@@ -2,35 +2,43 @@
  * ============================================================
  * AGENDA DE SALAS - SGD
  * Google Apps Script + Google Sheets
- * Versão 2.0 - agendamento por período
+ * Versão 3.0 - recorrência semanal + softwares por laboratório
  * ============================================================
  */
 
 const CONFIG = Object.freeze({
   ABA_SALAS: 'SALAS',
   ABA_AGENDAMENTOS: 'AGENDAMENTOS',
+  ABA_SOFTWARES: 'SOFTWARES',
+  ABA_SALAS_SOFTWARES: 'SALAS_SOFTWARES',
   STATUS_SALA_ATIVA: 'ATIVA',
+  STATUS_SOFTWARE_ATIVO: 'ATIVO',
   STATUS_CONFIRMADO: 'CONFIRMADO',
   STATUS_CANCELADO: 'CANCELADO',
   LOCK_TIMEOUT_MS: 10000,
   MASTER_SESSION_SECONDS: 21600,
   PERIODO_MAX_DIAS: 30,
   MASTER_USUARIO_PADRAO: 'cetem.sis.ti',
-  API_VERSION: '2.0.0'
+  API_VERSION: '3.0.0'
 });
+
+const DIAS_SEMANA = Object.freeze(['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB']);
 
 const CABECALHOS = Object.freeze({
   SALAS: ['id', 'nome', 'capacidade', 'localizacao', 'status'],
+  SOFTWARES: ['id', 'nome', 'status'],
+  SALAS_SOFTWARES: ['sala_id', 'software_id'],
   AGENDAMENTOS: [
     'id',
     'sala_id',
     'data_inicio',
     'data_fim',
+    'dias_semana',
     'hora_inicio',
     'hora_fim',
     'responsavel',
     'email_responsavel',
-    'finalidade',
+    'softwares',
     'observacao',
     'status',
     'criado_em',
@@ -39,87 +47,151 @@ const CABECALHOS = Object.freeze({
 });
 
 /* ============================================================
- * CONFIGURAÇÃO E MIGRAÇÃO
+ * CONFIGURAÇÃO E MIGRAÇÃO V0.6
  * ============================================================ */
 
 function configurarProjeto() {
   const planilha = SpreadsheetApp.getActiveSpreadsheet();
-
-  if (!planilha) {
-    throw new Error('Não foi possível identificar a planilha vinculada.');
-  }
+  if (!planilha) throw new Error('Não foi possível identificar a planilha vinculada.');
 
   PropertiesService.getScriptProperties().setProperty('PLANILHA_ID', planilha.getId());
   console.log('Projeto configurado: ' + planilha.getName());
 }
 
 /**
- * Execute UMA VEZ ao migrar da versão de agendamento por dia.
+ * EXECUTE UMA VEZ ao instalar a v0.6.
  *
- * Antes:
- * data
- *
- * Depois:
- * data_inicio | data_fim
- *
- * Para os registros antigos, data_fim recebe a mesma data de data_inicio,
- * preservando-os como reservas de um único dia.
+ * A função:
+ * - cria SOFTWARES e SALAS_SOFTWARES;
+ * - cria softwares de exemplo se a aba estiver vazia;
+ * - cria vínculos de exemplo para LAB201C e LAB202B;
+ * - migra AGENDAMENTOS para incluir dias_semana e softwares;
+ * - preserva a antiga finalidade dentro de observacao.
  */
-function migrarAgendamentosParaPeriodo() {
-  const aba = obterAba(CONFIG.ABA_AGENDAMENTOS);
-  const ultimaColuna = aba.getLastColumn();
+function prepararVersao06() {
+  configurarProjeto();
+  criarEstruturaSoftwares();
+  migrarAgendamentosVersao06();
+  SpreadsheetApp.flush();
+  console.log('Versão 0.6 preparada com sucesso.');
+}
 
-  if (!ultimaColuna) {
-    throw new Error('A aba AGENDAMENTOS está vazia.');
+function criarEstruturaSoftwares() {
+  const planilha = obterPlanilha();
+
+  let abaSoftwares = planilha.getSheetByName(CONFIG.ABA_SOFTWARES);
+  if (!abaSoftwares) abaSoftwares = planilha.insertSheet(CONFIG.ABA_SOFTWARES);
+
+  let abaVinculos = planilha.getSheetByName(CONFIG.ABA_SALAS_SOFTWARES);
+  if (!abaVinculos) abaVinculos = planilha.insertSheet(CONFIG.ABA_SALAS_SOFTWARES);
+
+  if (abaSoftwares.getLastRow() === 0) {
+    abaSoftwares.getRange(1, 1, 1, CABECALHOS.SOFTWARES.length).setValues([CABECALHOS.SOFTWARES]);
   }
 
-  let cabecalhos = aba.getRange(1, 1, 1, ultimaColuna).getValues()[0]
-    .map(valor => normalizarTexto(valor));
+  if (abaVinculos.getLastRow() === 0) {
+    abaVinculos.getRange(1, 1, 1, CABECALHOS.SALAS_SOFTWARES.length).setValues([CABECALHOS.SALAS_SOFTWARES]);
+  }
 
-  const indiceInicioExistente = cabecalhos.indexOf('data_inicio');
-  const indiceFimExistente = cabecalhos.indexOf('data_fim');
+  validarCabecalhos(abaSoftwares, CABECALHOS.SOFTWARES);
+  validarCabecalhos(abaVinculos, CABECALHOS.SALAS_SOFTWARES);
 
-  if (indiceInicioExistente >= 0 && indiceFimExistente >= 0) {
-    console.log('A planilha já está no formato de período. Nenhuma migração foi necessária.');
-    validarCabecalhos(aba, CABECALHOS.AGENDAMENTOS);
+  if (abaSoftwares.getLastRow() === 1) {
+    abaSoftwares.getRange(2, 1, 4, 3).setValues([
+      ['SOFT001', 'Pacote Office', 'ATIVO'],
+      ['SOFT002', 'Arduino IDE', 'ATIVO'],
+      ['SOFT003', 'Visual Studio Code', 'ATIVO'],
+      ['SOFT004', 'IntelliJ IDEA', 'ATIVO']
+    ]);
+  }
+
+  if (abaVinculos.getLastRow() === 1) {
+    const salasExistentes = listarSalas().map(sala => normalizarTexto(sala.id).toUpperCase());
+    const vinculos = [];
+
+    if (salasExistentes.includes('LAB201C')) {
+      vinculos.push(['LAB201C', 'SOFT001'], ['LAB201C', 'SOFT002']);
+    }
+
+    if (salasExistentes.includes('LAB202B')) {
+      vinculos.push(
+        ['LAB202B', 'SOFT001'],
+        ['LAB202B', 'SOFT003'],
+        ['LAB202B', 'SOFT004']
+      );
+    }
+
+    if (vinculos.length > 0) {
+      abaVinculos.getRange(2, 1, vinculos.length, 2).setValues(vinculos);
+    }
+  }
+}
+
+function migrarAgendamentosVersao06() {
+  const aba = obterAba(CONFIG.ABA_AGENDAMENTOS);
+  const ultimaLinha = aba.getLastRow();
+  const ultimaColuna = aba.getLastColumn();
+
+  if (!ultimaColuna) throw new Error('A aba AGENDAMENTOS está vazia.');
+
+  const valores = aba.getRange(1, 1, Math.max(ultimaLinha, 1), ultimaColuna).getValues();
+  const cabecalhosAtuais = valores[0].map(normalizarTexto);
+
+  const jaMigrada = CABECALHOS.AGENDAMENTOS.every(cabecalho => cabecalhosAtuais.includes(cabecalho));
+  if (jaMigrada) {
+    console.log('AGENDAMENTOS já está na estrutura da v0.6.');
     return;
   }
 
-  const indiceDataAntiga = cabecalhos.indexOf('data');
+  const linhasMigradas = valores.slice(1)
+    .filter(linha => normalizarTexto(linha[0]) !== '')
+    .map(linha => {
+      const atual = {};
+      cabecalhosAtuais.forEach((cabecalho, indice) => atual[cabecalho] = linha[indice]);
 
-  if (indiceDataAntiga >= 0) {
-    const colunaData = indiceDataAntiga + 1;
+      const dataAntiga = atual.data || '';
+      const dataInicio = atual.data_inicio || dataAntiga;
+      const dataFim = atual.data_fim || dataAntiga || dataInicio;
+      const diasSemana = normalizarLista(atual.dias_semana).length
+        ? normalizarLista(atual.dias_semana).join(',')
+        : DIAS_SEMANA.join(',');
 
-    aba.getRange(1, colunaData).setValue('data_inicio');
-    aba.insertColumnAfter(colunaData);
-    aba.getRange(1, colunaData + 1).setValue('data_fim');
+      const finalidadeAnterior = normalizarTexto(atual.finalidade);
+      let observacao = normalizarTexto(atual.observacao);
 
-    const ultimaLinha = aba.getLastRow();
+      if (finalidadeAnterior) {
+        const complemento = 'Finalidade anterior: ' + finalidadeAnterior;
+        observacao = observacao ? observacao + ' | ' + complemento : complemento;
+      }
 
-    if (ultimaLinha >= 2) {
-      const datasAntigas = aba.getRange(2, colunaData, ultimaLinha - 1, 1).getValues();
-      aba.getRange(2, colunaData + 1, ultimaLinha - 1, 1).setValues(datasAntigas);
-    }
-  } else if (indiceInicioExistente >= 0 && indiceFimExistente === -1) {
-    const colunaInicio = indiceInicioExistente + 1;
-    aba.insertColumnAfter(colunaInicio);
-    aba.getRange(1, colunaInicio + 1).setValue('data_fim');
+      return [
+        atual.id || '',
+        atual.sala_id || '',
+        dataInicio || '',
+        dataFim || '',
+        diasSemana,
+        atual.hora_inicio || '',
+        atual.hora_fim || '',
+        atual.responsavel || '',
+        atual.email_responsavel || '',
+        atual.softwares || '',
+        observacao,
+        atual.status || CONFIG.STATUS_CONFIRMADO,
+        atual.criado_em || '',
+        atual.atualizado_em || ''
+      ];
+    });
 
-    const ultimaLinha = aba.getLastRow();
+  aba.clearContents();
+  aba.getRange(1, 1, 1, CABECALHOS.AGENDAMENTOS.length).setValues([CABECALHOS.AGENDAMENTOS]);
 
-    if (ultimaLinha >= 2) {
-      const datasInicio = aba.getRange(2, colunaInicio, ultimaLinha - 1, 1).getValues();
-      aba.getRange(2, colunaInicio + 1, ultimaLinha - 1, 1).setValues(datasInicio);
-    }
-  } else {
-    throw new Error(
-      'Não foi encontrada a coluna "data" nem uma estrutura compatível com data_inicio/data_fim.'
-    );
+  if (linhasMigradas.length > 0) {
+    aba.getRange(2, 1, linhasMigradas.length, CABECALHOS.AGENDAMENTOS.length).setValues(linhasMigradas);
   }
 
   SpreadsheetApp.flush();
   validarCabecalhos(aba, CABECALHOS.AGENDAMENTOS);
-  console.log('Migração concluída. Os agendamentos antigos foram preservados como períodos de um dia.');
+  console.log('AGENDAMENTOS migrada para a v0.6. Registros antigos foram mantidos para todos os dias da semana.');
 }
 
 /* ============================================================
@@ -128,27 +200,16 @@ function migrarAgendamentosParaPeriodo() {
 
 function obterPlanilha() {
   const id = PropertiesService.getScriptProperties().getProperty('PLANILHA_ID');
-
-  if (id) {
-    return SpreadsheetApp.openById(id);
-  }
+  if (id) return SpreadsheetApp.openById(id);
 
   const planilha = SpreadsheetApp.getActiveSpreadsheet();
-
-  if (!planilha) {
-    throw new Error('Planilha não configurada. Execute configurarProjeto().');
-  }
-
+  if (!planilha) throw new Error('Planilha não configurada. Execute configurarProjeto().');
   return planilha;
 }
 
 function obterAba(nome) {
   const aba = obterPlanilha().getSheetByName(nome);
-
-  if (!aba) {
-    throw new Error('A aba "' + nome + '" não foi encontrada.');
-  }
-
+  if (!aba) throw new Error('A aba "' + nome + '" não foi encontrada.');
   return aba;
 }
 
@@ -158,20 +219,14 @@ function obterFusoHorario() {
 
 function validarCabecalhos(aba, esperados) {
   const ultimaColuna = aba.getLastColumn();
-
-  if (!ultimaColuna) {
-    throw new Error('A aba "' + aba.getName() + '" está vazia.');
-  }
+  if (!ultimaColuna) throw new Error('A aba "' + aba.getName() + '" está vazia.');
 
   const encontrados = aba.getRange(1, 1, 1, ultimaColuna).getValues()[0]
     .map(valor => normalizarTexto(valor));
-
   const faltantes = esperados.filter(item => !encontrados.includes(item));
 
   if (faltantes.length) {
-    throw new Error(
-      'A aba "' + aba.getName() + '" possui colunas ausentes: ' + faltantes.join(', ')
-    );
+    throw new Error('A aba "' + aba.getName() + '" possui colunas ausentes: ' + faltantes.join(', '));
   }
 
   return encontrados;
@@ -183,6 +238,29 @@ function validarCabecalhos(aba, esperados) {
 
 function normalizarTexto(valor) {
   return valor === null || valor === undefined ? '' : String(valor).trim();
+}
+
+function normalizarLista(valor) {
+  if (Array.isArray(valor)) {
+    return valor.map(normalizarTexto).filter(Boolean);
+  }
+
+  return normalizarTexto(valor)
+    .split(',')
+    .map(normalizarTexto)
+    .filter(Boolean);
+}
+
+function normalizarDiasSemana(valor) {
+  const dias = normalizarLista(valor).map(item => item.toUpperCase());
+  const unicos = [...new Set(dias)];
+  const invalidos = unicos.filter(item => !DIAS_SEMANA.includes(item));
+
+  if (invalidos.length) {
+    throw new Error('Dias da semana inválidos: ' + invalidos.join(', ') + '.');
+  }
+
+  return unicos;
 }
 
 function normalizarData(data) {
@@ -207,26 +285,19 @@ function normalizarHora(hora) {
 
   const texto = normalizarTexto(hora);
   const resultado = texto.match(/^(\d{1,2}):(\d{2})/);
-
-  return resultado
-    ? resultado[1].padStart(2, '0') + ':' + resultado[2]
-    : texto;
+  return resultado ? resultado[1].padStart(2, '0') + ':' + resultado[2] : texto;
 }
 
 function horaParaMinutos(hora) {
   const horario = normalizarHora(hora);
   const resultado = horario.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
 
-  if (!resultado) {
-    throw new Error('Horário inválido: "' + horario + '".');
-  }
-
+  if (!resultado) throw new Error('Horário inválido: "' + horario + '".');
   return Number(resultado[1]) * 60 + Number(resultado[2]);
 }
 
 function dataValida(data) {
   const resultado = data.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-
   if (!resultado) return false;
 
   const ano = Number(resultado[1]);
@@ -241,23 +312,17 @@ function dataValida(data) {
 
 function dataParaUtc(data) {
   const normalizada = normalizarData(data);
-
-  if (!dataValida(normalizada)) {
-    throw new Error('Data inválida: "' + normalizada + '".');
-  }
-
+  if (!dataValida(normalizada)) throw new Error('Data inválida: "' + normalizada + '".');
   const partes = normalizada.split('-').map(Number);
   return Date.UTC(partes[0], partes[1] - 1, partes[2]);
 }
 
-/**
- * Contagem inclusiva:
- * 01/09 a 30/09 = 30 dias.
- */
+function utcParaData(timestamp) {
+  return Utilities.formatDate(new Date(timestamp), 'UTC', 'yyyy-MM-dd');
+}
+
 function quantidadeDiasPeriodo(dataInicio, dataFim) {
-  const inicio = dataParaUtc(dataInicio);
-  const fim = dataParaUtc(dataFim);
-  return Math.floor((fim - inicio) / 86400000) + 1;
+  return Math.floor((dataParaUtc(dataFim) - dataParaUtc(dataInicio)) / 86400000) + 1;
 }
 
 function obterDataHoje() {
@@ -268,6 +333,26 @@ function obterHoraAtual() {
   return Utilities.formatDate(new Date(), obterFusoHorario(), 'HH:mm');
 }
 
+function codigoDiaSemana(data) {
+  const timestamp = dataParaUtc(data);
+  return DIAS_SEMANA[new Date(timestamp).getUTCDay()];
+}
+
+function gerarDatasOcorrencias(dataInicio, dataFim, diasSemana) {
+  const dias = normalizarDiasSemana(diasSemana);
+  const permitidos = new Set(dias);
+  const resultado = [];
+  const inicio = dataParaUtc(dataInicio);
+  const fim = dataParaUtc(dataFim);
+
+  for (let atual = inicio; atual <= fim; atual += 86400000) {
+    const data = utcParaData(atual);
+    if (permitidos.has(codigoDiaSemana(data))) resultado.push(data);
+  }
+
+  return resultado;
+}
+
 /* ============================================================
  * SALAS
  * ============================================================ */
@@ -276,7 +361,6 @@ function listarSalas() {
   const aba = obterAba(CONFIG.ABA_SALAS);
   const cabecalhos = validarCabecalhos(aba, CABECALHOS.SALAS);
   const ultimaLinha = aba.getLastRow();
-
   if (ultimaLinha < 2) return [];
 
   return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
@@ -296,9 +380,78 @@ function listarSalasAtivas() {
 
 function obterSalaPorId(id) {
   const procurado = normalizarTexto(id).toUpperCase();
-  return listarSalas().find(
-    sala => normalizarTexto(sala.id).toUpperCase() === procurado
+  return listarSalas().find(sala => normalizarTexto(sala.id).toUpperCase() === procurado);
+}
+
+/* ============================================================
+ * SOFTWARES
+ * ============================================================ */
+
+function listarSoftwares() {
+  const aba = obterAba(CONFIG.ABA_SOFTWARES);
+  const cabecalhos = validarCabecalhos(aba, CABECALHOS.SOFTWARES);
+  const ultimaLinha = aba.getLastRow();
+  if (ultimaLinha < 2) return [];
+
+  return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
+    .filter(linha => normalizarTexto(linha[0]) !== '')
+    .map(linha => {
+      const item = {};
+      cabecalhos.forEach((cabecalho, indice) => item[cabecalho] = linha[indice]);
+      return item;
+    });
+}
+
+function listarSoftwaresAtivos() {
+  return listarSoftwares().filter(
+    software => normalizarTexto(software.status).toUpperCase() === CONFIG.STATUS_SOFTWARE_ATIVO
   );
+}
+
+function listarVinculosSalasSoftwares() {
+  const aba = obterAba(CONFIG.ABA_SALAS_SOFTWARES);
+  const cabecalhos = validarCabecalhos(aba, CABECALHOS.SALAS_SOFTWARES);
+  const ultimaLinha = aba.getLastRow();
+  if (ultimaLinha < 2) return [];
+
+  return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
+    .filter(linha => normalizarTexto(linha[0]) !== '' && normalizarTexto(linha[1]) !== '')
+    .map(linha => {
+      const item = {};
+      cabecalhos.forEach((cabecalho, indice) => item[cabecalho] = linha[indice]);
+      return item;
+    });
+}
+
+function listarSoftwaresPorSala(salaId) {
+  const sala = normalizarTexto(salaId).toUpperCase();
+  if (!sala) return [];
+
+  const ids = new Set(
+    listarVinculosSalasSoftwares()
+      .filter(vinculo => normalizarTexto(vinculo.sala_id).toUpperCase() === sala)
+      .map(vinculo => normalizarTexto(vinculo.software_id).toUpperCase())
+  );
+
+  return listarSoftwaresAtivos().filter(
+    software => ids.has(normalizarTexto(software.id).toUpperCase())
+  );
+}
+
+function validarSoftwaresDaSala(salaId, softwaresSelecionados) {
+  const selecionados = normalizarLista(softwaresSelecionados).map(item => item.toUpperCase());
+  if (selecionados.length === 0) return [];
+
+  const permitidos = new Set(
+    listarSoftwaresPorSala(salaId).map(item => normalizarTexto(item.id).toUpperCase())
+  );
+
+  const invalidos = selecionados.filter(id => !permitidos.has(id));
+  if (invalidos.length) {
+    throw new Error('Um ou mais softwares selecionados não estão disponíveis neste laboratório: ' + invalidos.join(', ') + '.');
+  }
+
+  return [...new Set(selecionados)];
 }
 
 /* ============================================================
@@ -309,7 +462,6 @@ function listarAgendamentos() {
   const aba = obterAba(CONFIG.ABA_AGENDAMENTOS);
   const cabecalhos = validarCabecalhos(aba, CABECALHOS.AGENDAMENTOS);
   const ultimaLinha = aba.getLastRow();
-
   if (ultimaLinha < 2) return [];
 
   return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
@@ -331,6 +483,7 @@ function listarAgendamentos() {
         item[cabecalho] = valor;
       });
 
+      if (!normalizarLista(item.dias_semana).length) item.dias_semana = DIAS_SEMANA.join(',');
       return item;
     });
 }
@@ -341,25 +494,20 @@ function listarAgendamentosPublicos() {
     sala_id: item.sala_id,
     data_inicio: item.data_inicio,
     data_fim: item.data_fim,
+    dias_semana: item.dias_semana,
     hora_inicio: item.hora_inicio,
     hora_fim: item.hora_fim,
-    finalidade: item.finalidade,
+    softwares: item.softwares,
     status: item.status
   }));
 }
 
 function listarAgendamentosMaster(token) {
   if (!validarTokenMaster(token)) {
-    return {
-      sucesso: false,
-      mensagem: 'Sessão Master inválida ou expirada.'
-    };
+    return { sucesso: false, mensagem: 'Sessão Master inválida ou expirada.' };
   }
 
-  return {
-    sucesso: true,
-    dados: listarAgendamentos()
-  };
+  return { sucesso: true, dados: listarAgendamentos() };
 }
 
 /* ============================================================
@@ -367,32 +515,26 @@ function listarAgendamentosMaster(token) {
  * ============================================================ */
 
 function validarAgendamento(dados) {
-  if (!dados || typeof dados !== 'object') {
-    throw new Error('Dados do agendamento não informados.');
-  }
+  if (!dados || typeof dados !== 'object') throw new Error('Dados do agendamento não informados.');
 
   const agendamento = {
     sala_id: normalizarTexto(dados.sala_id),
     data_inicio: normalizarData(dados.data_inicio),
     data_fim: normalizarData(dados.data_fim),
+    dias_semana: normalizarDiasSemana(dados.dias_semana),
     hora_inicio: normalizarHora(dados.hora_inicio),
     hora_fim: normalizarHora(dados.hora_fim),
     responsavel: normalizarTexto(dados.responsavel),
     email_responsavel: normalizarTexto(dados.email_responsavel),
-    finalidade: normalizarTexto(dados.finalidade),
+    softwares: normalizarLista(dados.softwares),
     observacao: normalizarTexto(dados.observacao)
   };
 
-  if (!agendamento.sala_id) throw new Error('Informe a sala.');
-
-  if (!agendamento.data_inicio) throw new Error('Informe a data inicial.');
-  if (!dataValida(agendamento.data_inicio)) throw new Error('A data inicial informada é inválida.');
-
-  if (!agendamento.data_fim) throw new Error('Informe a data final.');
-  if (!dataValida(agendamento.data_fim)) throw new Error('A data final informada é inválida.');
+  if (!agendamento.sala_id) throw new Error('Informe o laboratório.');
+  if (!agendamento.data_inicio || !dataValida(agendamento.data_inicio)) throw new Error('Informe uma data inicial válida.');
+  if (!agendamento.data_fim || !dataValida(agendamento.data_fim)) throw new Error('Informe uma data final válida.');
 
   const hoje = obterDataHoje();
-
   if (agendamento.data_inicio < hoje) {
     throw new Error('Não é permitido iniciar um agendamento em uma data anterior à data atual.');
   }
@@ -401,82 +543,85 @@ function validarAgendamento(dados) {
     throw new Error('A data final deve ser igual ou posterior à data inicial.');
   }
 
-  const quantidadeDias = quantidadeDiasPeriodo(
-    agendamento.data_inicio,
-    agendamento.data_fim
-  );
-
-  if (quantidadeDias > CONFIG.PERIODO_MAX_DIAS) {
-    throw new Error(
-      'O período máximo permitido é de ' + CONFIG.PERIODO_MAX_DIAS + ' dias corridos.'
-    );
+  if (quantidadeDiasPeriodo(agendamento.data_inicio, agendamento.data_fim) > CONFIG.PERIODO_MAX_DIAS) {
+    throw new Error('O período máximo permitido é de ' + CONFIG.PERIODO_MAX_DIAS + ' dias corridos.');
   }
 
-  if (!agendamento.hora_inicio) throw new Error('Informe o horário inicial.');
-  if (!agendamento.hora_fim) throw new Error('Informe o horário final.');
+  if (agendamento.dias_semana.length === 0) {
+    throw new Error('Selecione pelo menos um dia da semana.');
+  }
+
+  const ocorrencias = gerarDatasOcorrencias(
+    agendamento.data_inicio,
+    agendamento.data_fim,
+    agendamento.dias_semana
+  );
+
+  if (ocorrencias.length === 0) {
+    throw new Error('Os dias da semana selecionados não ocorrem dentro do período informado.');
+  }
+
+  if (!agendamento.hora_inicio || !agendamento.hora_fim) throw new Error('Informe os horários inicial e final.');
 
   const inicio = horaParaMinutos(agendamento.hora_inicio);
   const fim = horaParaMinutos(agendamento.hora_fim);
+  if (inicio >= fim) throw new Error('O horário final deve ser posterior ao horário inicial.');
 
-  if (inicio >= fim) {
-    throw new Error('O horário final deve ser posterior ao horário inicial.');
-  }
-
-  if (agendamento.data_inicio === hoje) {
-    const minutosAgora = horaParaMinutos(obterHoraAtual());
-
-    if (inicio <= minutosAgora) {
-      throw new Error(
-        'Para períodos que começam hoje, o horário inicial deve ser posterior ao horário atual.'
-      );
-    }
+  if (ocorrencias.includes(hoje) && inicio <= horaParaMinutos(obterHoraAtual())) {
+    throw new Error('Para uma ocorrência de hoje, o horário inicial deve ser posterior ao horário atual.');
   }
 
   if (!agendamento.responsavel) throw new Error('Informe o responsável.');
-  if (!agendamento.finalidade) throw new Error('Informe a finalidade.');
 
   const sala = obterSalaPorId(agendamento.sala_id);
-
-  if (!sala) throw new Error('A sala informada não existe.');
-
+  if (!sala) throw new Error('O laboratório informado não existe.');
   if (normalizarTexto(sala.status).toUpperCase() !== CONFIG.STATUS_SALA_ATIVA) {
-    throw new Error('A sala informada está inativa.');
+    throw new Error('O laboratório informado está inativo.');
   }
 
+  agendamento.softwares = validarSoftwaresDaSala(agendamento.sala_id, agendamento.softwares);
+  agendamento.ocorrencias = ocorrencias;
   return agendamento;
 }
 
-/**
- * Há conflito quando, para a mesma sala:
- * 1) os períodos de datas se sobrepõem; E
- * 2) os horários diários se sobrepõem.
- */
-function existeConflito(salaId, dataInicio, dataFim, horaInicio, horaFim) {
+function encontrarConflitos(salaId, ocorrenciasNovas, horaInicio, horaFim) {
   const sala = normalizarTexto(salaId).toUpperCase();
-  const novoInicioData = normalizarData(dataInicio);
-  const novoFimData = normalizarData(dataFim);
-  const novoInicioHora = horaParaMinutos(horaInicio);
-  const novoFimHora = horaParaMinutos(horaFim);
+  const datasNovas = new Set(ocorrenciasNovas);
+  const novoInicio = horaParaMinutos(horaInicio);
+  const novoFim = horaParaMinutos(horaFim);
+  const conflitos = [];
 
-  return listarAgendamentos().some(item => {
-    if (normalizarTexto(item.status).toUpperCase() === CONFIG.STATUS_CANCELADO) return false;
-    if (normalizarTexto(item.sala_id).toUpperCase() !== sala) return false;
-
-    const periodosSeSobrepoem =
-      novoInicioData <= normalizarData(item.data_fim) &&
-      novoFimData >= normalizarData(item.data_inicio);
-
-    if (!periodosSeSobrepoem) return false;
+  listarAgendamentos().forEach(item => {
+    if (normalizarTexto(item.status).toUpperCase() === CONFIG.STATUS_CANCELADO) return;
+    if (normalizarTexto(item.sala_id).toUpperCase() !== sala) return;
 
     const inicioExistente = horaParaMinutos(item.hora_inicio);
     const fimExistente = horaParaMinutos(item.hora_fim);
+    const horariosSeSobrepoem = novoInicio < fimExistente && novoFim > inicioExistente;
+    if (!horariosSeSobrepoem) return;
 
-    const horariosSeSobrepoem =
-      novoInicioHora < fimExistente &&
-      novoFimHora > inicioExistente;
+    const diasExistentes = normalizarDiasSemana(item.dias_semana);
+    const ocorrenciasExistentes = gerarDatasOcorrencias(item.data_inicio, item.data_fim, diasExistentes);
 
-    return horariosSeSobrepoem;
+    ocorrenciasExistentes.forEach(data => {
+      if (datasNovas.has(data)) {
+        conflitos.push({
+          data: data,
+          agendamento_id: normalizarTexto(item.id),
+          hora_inicio: normalizarHora(item.hora_inicio),
+          hora_fim: normalizarHora(item.hora_fim)
+        });
+      }
+    });
   });
+
+  const unicos = {};
+  conflitos.forEach(item => {
+    const chave = item.data + '|' + item.agendamento_id + '|' + item.hora_inicio + '|' + item.hora_fim;
+    unicos[chave] = item;
+  });
+
+  return Object.values(unicos).sort((a, b) => a.data.localeCompare(b.data));
 }
 
 /* ============================================================
@@ -492,18 +637,19 @@ function criarAgendamento(dados) {
     obtido = true;
 
     const agendamento = validarAgendamento(dados);
-
-    if (existeConflito(
+    const conflitos = encontrarConflitos(
       agendamento.sala_id,
-      agendamento.data_inicio,
-      agendamento.data_fim,
+      agendamento.ocorrencias,
       agendamento.hora_inicio,
       agendamento.hora_fim
-    )) {
+    );
+
+    if (conflitos.length) {
+      const primeirasDatas = [...new Set(conflitos.map(item => item.data))].slice(0, 5);
       return {
         sucesso: false,
-        mensagem:
-          'A sala já possui um agendamento que conflita com alguma data e horário deste período.'
+        mensagem: 'Não foi possível reservar. Existem conflitos nas datas: ' + primeirasDatas.join(', ') + (conflitos.length > 5 ? '...' : '') + '.',
+        conflitos: conflitos
       };
     }
 
@@ -515,11 +661,12 @@ function criarAgendamento(dados) {
       agendamento.sala_id,
       agendamento.data_inicio,
       agendamento.data_fim,
+      agendamento.dias_semana.join(','),
       agendamento.hora_inicio,
       agendamento.hora_fim,
       agendamento.responsavel,
       agendamento.email_responsavel,
-      agendamento.finalidade,
+      agendamento.softwares.join(','),
       agendamento.observacao,
       CONFIG.STATUS_CONFIRMADO,
       agora,
@@ -530,8 +677,9 @@ function criarAgendamento(dados) {
 
     return {
       sucesso: true,
-      mensagem: 'Agendamento por período realizado com sucesso.',
-      id: id
+      mensagem: 'Agendamento recorrente realizado com sucesso.',
+      id: id,
+      ocorrencias: agendamento.ocorrencias
     };
   } finally {
     if (obtido) lock.releaseLock();
@@ -555,10 +703,6 @@ function hashSenha(senha, salt) {
   }).join('');
 }
 
-/**
- * Define o usuário Master como cetem.sis.ti e solicita apenas a senha.
- * Execute manualmente somente se quiser criar/trocar a senha Master.
- */
 function configurarUsuarioMaster() {
   const ui = SpreadsheetApp.getUi();
   const usuario = CONFIG.MASTER_USUARIO_PADRAO;
@@ -572,10 +716,7 @@ function configurarUsuarioMaster() {
   if (respostaSenha.getSelectedButton() !== ui.Button.OK) return;
 
   const senha = respostaSenha.getResponseText();
-
-  if (senha.length < 8) {
-    throw new Error('A senha deve possuir pelo menos 8 caracteres.');
-  }
+  if (senha.length < 8) throw new Error('A senha deve possuir pelo menos 8 caracteres.');
 
   const salt = Utilities.getUuid();
   const senhaHash = hashSenha(senha, salt);
@@ -610,7 +751,6 @@ function autenticarMaster(usuario, senha) {
   }
 
   const token = Utilities.getUuid() + Utilities.getUuid();
-
   CacheService.getScriptCache().put(
     'MASTER_TOKEN_' + token,
     usuarioConfigurado,
@@ -629,26 +769,16 @@ function autenticarMaster(usuario, senha) {
 function validarTokenMaster(token) {
   const normalizado = normalizarTexto(token);
   if (!normalizado) return false;
-
-  return Boolean(
-    CacheService.getScriptCache().get('MASTER_TOKEN_' + normalizado)
-  );
+  return Boolean(CacheService.getScriptCache().get('MASTER_TOKEN_' + normalizado));
 }
 
 function verificarSessaoMaster(token) {
-  return {
-    sucesso: true,
-    autenticado: validarTokenMaster(token)
-  };
+  return { sucesso: true, autenticado: validarTokenMaster(token) };
 }
 
 function logoutMaster(token) {
   const normalizado = normalizarTexto(token);
-
-  if (normalizado) {
-    CacheService.getScriptCache().remove('MASTER_TOKEN_' + normalizado);
-  }
-
+  if (normalizado) CacheService.getScriptCache().remove('MASTER_TOKEN_' + normalizado);
   return { sucesso: true, mensagem: 'Sessão encerrada.' };
 }
 
@@ -658,10 +788,7 @@ function logoutMaster(token) {
 
 function cancelarAgendamento(idAgendamento, token) {
   if (!validarTokenMaster(token)) {
-    return {
-      sucesso: false,
-      mensagem: 'Apenas o usuário Master pode cancelar agendamentos.'
-    };
+    return { sucesso: false, mensagem: 'Apenas o usuário Master pode cancelar agendamentos.' };
   }
 
   const id = normalizarTexto(idAgendamento);
@@ -691,21 +818,16 @@ function cancelarAgendamento(idAgendamento, token) {
     if (indiceLinha === -1) throw new Error('Agendamento não encontrado.');
 
     const statusAtual = normalizarTexto(dados[indiceLinha][indiceStatus]).toUpperCase();
-
     if (statusAtual === CONFIG.STATUS_CANCELADO) {
       return { sucesso: false, mensagem: 'Este agendamento já está cancelado.' };
     }
 
     const linhaPlanilha = indiceLinha + 2;
-
     aba.getRange(linhaPlanilha, indiceStatus + 1).setValue(CONFIG.STATUS_CANCELADO);
     aba.getRange(linhaPlanilha, indiceAtualizado + 1).setValue(new Date());
     SpreadsheetApp.flush();
 
-    return {
-      sucesso: true,
-      mensagem: 'Todo o período do agendamento foi cancelado com sucesso.'
-    };
+    return { sucesso: true, mensagem: 'O agendamento recorrente foi cancelado com sucesso.' };
   } finally {
     if (obtido) lock.releaseLock();
   }
@@ -722,6 +844,15 @@ function doGet(e) {
     switch (acao) {
       case 'salas':
         return respostaJson({ sucesso: true, dados: listarSalasAtivas() });
+
+      case 'softwares':
+        return respostaJson({ sucesso: true, dados: listarSoftwaresAtivos() });
+
+      case 'softwaresporsala':
+        return respostaJson({
+          sucesso: true,
+          dados: listarSoftwaresPorSala(e && e.parameter ? e.parameter.sala_id : '')
+        });
 
       case 'agendamentos':
         return respostaJson({ sucesso: true, dados: listarAgendamentosPublicos() });
@@ -746,7 +877,6 @@ function doPost(e) {
     }
 
     let dados;
-
     try {
       dados = JSON.parse(e.postData.contents);
     } catch (erroJson) {
@@ -758,22 +888,16 @@ function doPost(e) {
     switch (acao) {
       case 'criarAgendamento':
         return respostaJson(criarAgendamento(dados));
-
       case 'loginMaster':
         return respostaJson(autenticarMaster(dados.usuario, dados.senha));
-
       case 'validarSessaoMaster':
         return respostaJson(verificarSessaoMaster(dados.token));
-
       case 'logoutMaster':
         return respostaJson(logoutMaster(dados.token));
-
       case 'cancelarAgendamento':
         return respostaJson(cancelarAgendamento(dados.id, dados.token));
-
       case 'listarAgendamentosMaster':
         return respostaJson(listarAgendamentosMaster(dados.token));
-
       default:
         return respostaJson({ sucesso: false, mensagem: 'Ação inválida.' });
     }
@@ -798,33 +922,24 @@ function respostaErro(erro) {
  * TESTES
  * ============================================================ */
 
-function testarLeituraSalas() {
-  const dados = listarSalasAtivas();
+function testarSoftwares201C() {
+  const dados = listarSoftwaresPorSala('LAB201C');
   console.log(JSON.stringify(dados, null, 2));
   return dados;
+}
+
+function testarRecorrenciaQuartaQuinta() {
+  const datas = gerarDatasOcorrencias(
+    '2026-09-14',
+    '2026-09-30',
+    ['QUA', 'QUI']
+  );
+  console.log(JSON.stringify(datas));
+  return datas;
 }
 
 function testarLeituraAgendamentos() {
   const dados = listarAgendamentos();
   console.log(JSON.stringify(dados, null, 2));
   return dados;
-}
-
-function testarPeriodo30Dias() {
-  const quantidade = quantidadeDiasPeriodo('2026-09-01', '2026-09-30');
-  console.log('Quantidade de dias: ' + quantidade);
-  return quantidade;
-}
-
-function testarConflitoPeriodo() {
-  const resultado = existeConflito(
-    'LAB201C',
-    '2026-09-01',
-    '2026-09-23',
-    '08:00',
-    '10:00'
-  );
-
-  console.log('Existe conflito no período? ' + resultado);
-  return resultado;
 }

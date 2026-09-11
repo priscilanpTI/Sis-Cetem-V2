@@ -7,58 +7,23 @@ import {
   Filter,
   LockKeyhole,
   LogOut,
-  RotateCcw,
   ShieldCheck
 } from 'lucide-react';
-import { bookingService, masterService, roomService } from '../services/bookingService';
-import type { Booking, Room } from '../types';
+import { bookingService, masterService, roomService, softwareService } from '../services/bookingService';
+import type { Booking, Room, Software } from '../types';
+import { WEEKDAYS, bookingMatchesDateRange, formatDateBr, timesOverlap } from '../utils/bookingDates';
 
-function formatDateBr(date: string): string {
-  return new Date(`${date}T12:00:00`).toLocaleDateString('pt-BR');
-}
-
-function formatPeriod(startDate: string, endDate: string): string {
-  if (startDate === endDate) {
-    return formatDateBr(startDate);
-  }
-
-  return `${formatDateBr(startDate)} → ${formatDateBr(endDate)}`;
-}
-
-function overlapsDateRange(
-  booking: Booking,
-  filterStartDate: string,
-  filterEndDate: string
-): boolean {
-  if (!filterStartDate) {
-    return true;
-  }
-
-  const effectiveEndDate = filterEndDate || filterStartDate;
-  return booking.startDate <= effectiveEndDate && booking.endDate >= filterStartDate;
-}
-
-function overlapsTimeRange(
-  booking: Booking,
-  filterStartTime: string,
-  filterEndTime: string
-): boolean {
-  if (!filterStartTime) {
-    return true;
-  }
-
-  // Apenas um horário informado: consulta quais reservas abrangem aquele instante.
-  if (!filterEndTime) {
-    return booking.startTime <= filterStartTime && booking.endTime > filterStartTime;
-  }
-
-  // Intervalo informado: verifica sobreposição de horários.
-  return booking.startTime < filterEndTime && booking.endTime > filterStartTime;
+function matchesTimeRange(booking: Booking, startTime: string, endTime: string): boolean {
+  if (!startTime && !endTime) return true;
+  if (startTime && !endTime) return booking.startTime <= startTime && booking.endTime > startTime;
+  if (!startTime && endTime) return booking.startTime < endTime;
+  return timesOverlap(booking.startTime, booking.endTime, startTime, endTime);
 }
 
 export function Bookings() {
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [softwares, setSoftwares] = useState<Software[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -70,7 +35,6 @@ export function Bookings() {
   const [loggingIn, setLoggingIn] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
 
-  // Filtros disponíveis para todos os usuários.
   const [allRooms, setAllRooms] = useState(true);
   const [selectedRoomIds, setSelectedRoomIds] = useState<string[]>([]);
   const [filterStartDate, setFilterStartDate] = useState('');
@@ -83,13 +47,15 @@ export function Bookings() {
     setLoading(true);
 
     try {
-      const [bookingList, roomList] = await Promise.all([
+      const [bookingList, roomList, softwareList] = await Promise.all([
         masterMode ? bookingService.listMaster() : bookingService.list(),
-        roomService.list()
+        roomService.list(),
+        softwareService.listAll()
       ]);
 
       setBookings(bookingList);
       setRooms(roomList);
+      setSoftwares(softwareList);
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Não foi possível carregar os agendamentos.';
       setError(message);
@@ -133,30 +99,18 @@ export function Bookings() {
     return '';
   }, [filterStartDate, filterEndDate, filterStartTime, filterEndTime]);
 
-  const roomMatchesFilter = (roomId: string) =>
-    allRooms || selectedRoomIds.includes(roomId);
+  const roomMatchesFilter = (roomId: string) => allRooms || selectedRoomIds.includes(roomId);
 
   const filteredBookings = useMemo(() => {
-    if (filterError) {
-      return [];
-    }
+    if (filterError) return [];
 
     return bookings.filter(
       (booking) =>
         roomMatchesFilter(booking.roomId) &&
-        overlapsDateRange(booking, filterStartDate, filterEndDate) &&
-        overlapsTimeRange(booking, filterStartTime, filterEndTime)
+        bookingMatchesDateRange(booking, filterStartDate, filterEndDate) &&
+        matchesTimeRange(booking, filterStartTime, filterEndTime)
     );
-  }, [
-    bookings,
-    allRooms,
-    selectedRoomIds,
-    filterStartDate,
-    filterEndDate,
-    filterStartTime,
-    filterEndTime,
-    filterError
-  ]);
+  }, [bookings, allRooms, selectedRoomIds, filterStartDate, filterEndDate, filterStartTime, filterEndTime, filterError]);
 
   const roomsForAvailability = useMemo(
     () => rooms.filter((room) => roomMatchesFilter(room.id)),
@@ -164,87 +118,52 @@ export function Bookings() {
   );
 
   const availability = useMemo(() => {
-    if (!filterStartDate || filterError) {
-      return [];
-    }
+    if (!filterStartDate || filterError) return [];
 
-    return roomsForAvailability
-      .map((room) => {
-        const conflicts = bookings.filter(
-          (booking) =>
-            booking.status === 'Confirmado' &&
-            booking.roomId === room.id &&
-            overlapsDateRange(booking, filterStartDate, filterEndDate) &&
-            overlapsTimeRange(booking, filterStartTime, filterEndTime)
-        );
+    return roomsForAvailability.map((room) => {
+      const conflicts = bookings.filter(
+        (booking) =>
+          booking.status === 'Confirmado' &&
+          booking.roomId === room.id &&
+          bookingMatchesDateRange(booking, filterStartDate, filterEndDate) &&
+          matchesTimeRange(booking, filterStartTime, filterEndTime)
+      );
 
-        const latestConflictDate = conflicts.reduce(
-          (latest, booking) => (booking.endDate > latest ? booking.endDate : latest),
-          ''
-        );
+      const latestConflictDate = conflicts.reduce(
+        (latest, booking) => (booking.endDate > latest ? booking.endDate : latest),
+        ''
+      );
 
-        return {
-          room,
-          occupied: conflicts.length > 0,
-          conflictCount: conflicts.length,
-          latestConflictDate
-        };
-      })
-      .sort((a, b) => {
-        if (a.occupied !== b.occupied) {
-          return a.occupied ? -1 : 1;
-        }
-
-        return a.room.name.localeCompare(b.room.name, 'pt-BR');
-      });
-  }, [
-    roomsForAvailability,
-    bookings,
-    filterStartDate,
-    filterEndDate,
-    filterStartTime,
-    filterEndTime,
-    filterError
-  ]);
+      return {
+        room,
+        occupied: conflicts.length > 0,
+        conflictCount: conflicts.length,
+        latestConflictDate
+      };
+    });
+  }, [roomsForAvailability, bookings, filterStartDate, filterEndDate, filterStartTime, filterEndTime, filterError]);
 
   const availabilitySummary = useMemo(() => {
     const occupied = availability.filter((item) => item.occupied).length;
-    return {
-      occupied,
-      available: Math.max(availability.length - occupied, 0)
-    };
+    return { occupied, available: Math.max(availability.length - occupied, 0) };
   }, [availability]);
 
   const hasFilters =
-    !allRooms ||
-    Boolean(filterStartDate) ||
-    Boolean(filterEndDate) ||
-    Boolean(filterStartTime) ||
-    Boolean(filterEndTime);
+    !allRooms || Boolean(filterStartDate) || Boolean(filterEndDate) || Boolean(filterStartTime) || Boolean(filterEndTime);
 
   const roomSelectionLabel = useMemo(() => {
-    if (allRooms) {
-      return 'Todos os laboratórios';
-    }
-
-    const selectedRooms = rooms.filter((room) =>
-      selectedRoomIds.includes(room.id)
-    );
-
-    if (selectedRooms.length === 0) {
-      return 'Todos os laboratórios';
-    }
-
-    if (selectedRooms.length === 1) {
-      return selectedRooms[0].name;
-    }
-
-    if (selectedRooms.length === 2) {
-      return `${selectedRooms[0].name} + ${selectedRooms[1].name}`;
-    }
-
+    if (allRooms) return 'Todos os laboratórios';
+    const selectedRooms = rooms.filter((room) => selectedRoomIds.includes(room.id));
+    if (selectedRooms.length === 0) return 'Todos os laboratórios';
+    if (selectedRooms.length === 1) return selectedRooms[0].name;
+    if (selectedRooms.length === 2) return `${selectedRooms[0].name} + ${selectedRooms[1].name}`;
     return `${selectedRooms.length} laboratórios selecionados`;
   }, [allRooms, rooms, selectedRoomIds]);
+
+  const softwareNames = useMemo(
+    () => new Map(softwares.map((software) => [software.id, software.name])),
+    [softwares]
+  );
 
   function toggleRoom(roomId: string) {
     if (allRooms) {
@@ -257,11 +176,7 @@ export function Bookings() {
       const next = current.includes(roomId)
         ? current.filter((id) => id !== roomId)
         : [...current, roomId];
-
-      if (next.length === 0) {
-        setAllRooms(true);
-      }
-
+      if (next.length === 0) setAllRooms(true);
       return next;
     });
   }
@@ -324,9 +239,7 @@ export function Bookings() {
       return;
     }
 
-    if (!window.confirm('Deseja realmente cancelar todo este período de agendamento?')) {
-      return;
-    }
+    if (!window.confirm('Deseja realmente cancelar todo este agendamento recorrente?')) return;
 
     setError('');
     setCancellingId(id);
@@ -335,20 +248,11 @@ export function Bookings() {
       await bookingService.cancel(id);
       await load(true);
     } catch (e) {
-      const message = e instanceof Error ? e.message : 'Não foi possível cancelar o agendamento.';
-      setError(message);
-
-      if (!masterService.hasStoredSession()) {
-        setIsMaster(false);
-        setMasterUser('');
-        await load(false);
-      }
+      setError(e instanceof Error ? e.message : 'Não foi possível cancelar o agendamento.');
     } finally {
       setCancellingId(null);
     }
   }
-
-  const effectiveFilterEndDate = filterEndDate || filterStartDate;
 
   return (
     <section>
@@ -358,27 +262,17 @@ export function Bookings() {
           <h1>Agendamentos</h1>
           <p>
             {isMaster
-              ? 'Modo Master ativo: dados completos e cancelamento do período habilitado.'
-              : 'Consulte ocupação e disponibilidade por laboratório, dia, período ou horário.'}
+              ? 'Modo Master ativo: dados completos e cancelamento habilitado.'
+              : 'Consulte ocupação e disponibilidade por laboratório, período e horário.'}
           </p>
         </div>
 
         <div className="master-actions">
           {isMaster ? (
             <>
-              <span className="master-badge">
-                <ShieldCheck size={17} />
-                Master: {masterUser}
-              </span>
-
-              <button
-                type="button"
-                className="secondary"
-                onClick={handleLogout}
-                disabled={loggingOut}
-              >
-                <LogOut size={17} />
-                {loggingOut ? 'Saindo...' : 'Sair do Master'}
+              <span className="master-badge"><ShieldCheck size={17} /> Master: {masterUser}</span>
+              <button type="button" className="secondary" onClick={handleLogout} disabled={loggingOut}>
+                <LogOut size={17} /> {loggingOut ? 'Saindo...' : 'Sair do Master'}
               </button>
             </>
           ) : (
@@ -390,8 +284,7 @@ export function Bookings() {
                 setShowLogin((value) => !value);
               }}
             >
-              <LockKeyhole size={17} />
-              Acesso Master
+              <LockKeyhole size={17} /> Acesso Master
             </button>
           )}
         </div>
@@ -402,385 +295,168 @@ export function Bookings() {
           <div>
             <span className="eyebrow">Área restrita</span>
             <h2>Acesso Master</h2>
-            <p className="muted">
-              Entre com as credenciais do administrador para visualizar os dados completos e cancelar reservas.
-            </p>
+            <p className="muted">Use as credenciais do administrador para visualizar dados completos e cancelar reservas.</p>
           </div>
-
           <div className="master-login-grid">
-            <label>
-              Usuário
-              <input
-                name="usuario"
-                autoComplete="username"
-                required
-                disabled={loggingIn}
-              />
-            </label>
-
-            <label>
-              Senha
-              <input
-                type="password"
-                name="senha"
-                autoComplete="current-password"
-                required
-                disabled={loggingIn}
-              />
-            </label>
+            <label>Usuário<input name="usuario" autoComplete="username" required disabled={loggingIn} /></label>
+            <label>Senha<input type="password" name="senha" autoComplete="current-password" required disabled={loggingIn} /></label>
           </div>
-
           {loginError && <div className="error">{loginError}</div>}
-
           <div className="actions">
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setShowLogin(false)}
-              disabled={loggingIn}
-            >
-              Cancelar
-            </button>
-
-            <button className="primary" type="submit" disabled={loggingIn}>
-              {loggingIn ? 'Entrando...' : 'Entrar'}
-            </button>
+            <button type="button" className="secondary" onClick={() => setShowLogin(false)} disabled={loggingIn}>Cancelar</button>
+            <button className="primary" type="submit" disabled={loggingIn}>{loggingIn ? 'Entrando...' : 'Entrar'}</button>
           </div>
         </form>
       )}
 
-      {error && <div className="error page-error">{error}</div>}
-
-      <div className="panel filters-panel">
+      <section className="panel filters-panel">
         <div className="filters-header">
           <div>
             <span className="eyebrow">Consulta</span>
             <h2>Filtrar disponibilidade</h2>
-            <p className="muted">
-              Selecione um ou mais laboratórios e combine filtros por dia, período e horário.
-            </p>
+            <p className="muted">Selecione laboratórios, datas e horários para localizar reservas reais dos dias recorrentes.</p>
           </div>
-
-          <button
-            type="button"
-            className="secondary"
-            onClick={clearFilters}
-            disabled={!hasFilters}
-          >
-            <RotateCcw size={16} />
-            Limpar filtros
-          </button>
+          {hasFilters && <button type="button" className="secondary" onClick={clearFilters}>Limpar filtros</button>}
         </div>
 
         <div className="filter-section">
-          <div className="filter-title">
-            <Filter size={17} />
-            <strong>Laboratórios</strong>
-          </div>
-
+          <div className="filter-title"><Filter size={17} /><strong>Laboratórios</strong></div>
           <details className="room-select-dropdown">
             <summary className="room-select-summary">
-              <span className="room-select-summary-text">
-                {roomSelectionLabel}
-              </span>
+              <span className="room-select-summary-text">{roomSelectionLabel}</span>
               <ChevronDown size={18} className="room-select-chevron" />
             </summary>
-
             <div className="room-select-menu">
               <label className={`room-select-option ${allRooms ? 'selected' : ''}`}>
-                <input
-                  type="checkbox"
-                  checked={allRooms}
-                  onChange={selectAllRooms}
-                />
-                <span className="room-select-check">
-                  {allRooms && <Check size={14} />}
-                </span>
-                <span>
-                  <strong>Todos os laboratórios</strong>
-                  <small>Consultar todas as salas cadastradas</small>
-                </span>
+                <input type="checkbox" checked={allRooms} onChange={selectAllRooms} />
+                <span className="room-select-check">{allRooms && <Check size={14} />}</span>
+                <span><strong>Todos os laboratórios</strong><small>Consultar todas as salas</small></span>
               </label>
-
               <div className="room-select-divider" />
-
               {rooms.map((room) => {
                 const active = !allRooms && selectedRoomIds.includes(room.id);
-
                 return (
-                  <label
-                    className={`room-select-option ${active ? 'selected' : ''}`}
-                    key={room.id}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={active}
-                      onChange={() => toggleRoom(room.id)}
-                    />
-                    <span className="room-select-check">
-                      {active && <Check size={14} />}
-                    </span>
-                    <span>
-                      <strong>{room.name}</strong>
-                      <small>
-                        {room.location} • {room.capacity} lugares
-                      </small>
-                    </span>
+                  <label className={`room-select-option ${active ? 'selected' : ''}`} key={room.id}>
+                    <input type="checkbox" checked={active} onChange={() => toggleRoom(room.id)} />
+                    <span className="room-select-check">{active && <Check size={14} />}</span>
+                    <span><strong>{room.name}</strong><small>{room.location} • {room.capacity} lugares</small></span>
                   </label>
                 );
               })}
             </div>
           </details>
-
-          <span className="field-hint">
-            Abra a lista e marque um ou mais laboratórios. Se nenhum estiver selecionado,
-            o sistema considera todos.
-          </span>
         </div>
 
         <div className="filters-grid">
-          <label>
-            <span className="filter-label">
-              <CalendarRange size={16} />
-              Dia / início do período
-            </span>
-            <input
-              type="date"
-              value={filterStartDate}
-              onChange={(event) => {
-                const value = event.target.value;
-                setFilterStartDate(value);
-
-                if (filterEndDate && value && filterEndDate < value) {
-                  setFilterEndDate('');
-                }
-              }}
-            />
-            <span className="field-hint">
-              Para consultar um único dia, não é necessário preencher a data final.
-            </span>
-          </label>
-
-          <label>
-            <span className="filter-label">
-              <CalendarRange size={16} />
-              Fim do período
-            </span>
-            <input
-              type="date"
-              value={filterEndDate}
-              min={filterStartDate || undefined}
-              disabled={!filterStartDate}
-              onChange={(event) => setFilterEndDate(event.target.value)}
-            />
-            <span className="field-hint">Opcional. Use para consultas de vários dias.</span>
-          </label>
-
-          <label>
-            <span className="filter-label">
-              <Clock3 size={16} />
-              Horário inicial
-            </span>
-            <input
-              type="time"
-              value={filterStartTime}
-              onChange={(event) => {
-                const value = event.target.value;
-                setFilterStartTime(value);
-
-                if (filterEndTime && value && filterEndTime <= value) {
-                  setFilterEndTime('');
-                }
-              }}
-            />
-            <span className="field-hint">
-              Sozinho, mostra reservas que estejam ocupadas exatamente nesse horário.
-            </span>
-          </label>
-
-          <label>
-            <span className="filter-label">
-              <Clock3 size={16} />
-              Horário final
-            </span>
-            <input
-              type="time"
-              value={filterEndTime}
-              min={filterStartTime || undefined}
-              disabled={!filterStartTime}
-              onChange={(event) => setFilterEndTime(event.target.value)}
-            />
-            <span className="field-hint">Opcional. Preencha para consultar uma faixa de horário.</span>
-          </label>
+          <label><span className="filter-label"><CalendarRange size={16} /> Dia / início do período</span><input type="date" value={filterStartDate} onChange={(e) => setFilterStartDate(e.target.value)} /></label>
+          <label>Fim do período<input type="date" min={filterStartDate || undefined} value={filterEndDate} onChange={(e) => setFilterEndDate(e.target.value)} disabled={!filterStartDate} /></label>
+          <label><span className="filter-label"><Clock3 size={16} /> Horário inicial</span><input type="time" value={filterStartTime} onChange={(e) => setFilterStartTime(e.target.value)} /></label>
+          <label>Horário final<input type="time" value={filterEndTime} onChange={(e) => setFilterEndTime(e.target.value)} /></label>
         </div>
 
         {filterError && <div className="error">{filterError}</div>}
-
-        <div className="filter-result-line">
-          <strong>{filteredBookings.length}</strong>
-          <span>
-            agendamento{filteredBookings.length === 1 ? '' : 's'} encontrado{filteredBookings.length === 1 ? '' : 's'}
-          </span>
-          {filterStartDate && !filterError && (
-            <span className="filter-context">
-              • consulta de {formatPeriod(filterStartDate, effectiveFilterEndDate)}
-              {filterStartTime && ` • ${filterStartTime}${filterEndTime ? ` às ${filterEndTime}` : ''}`}
-            </span>
-          )}
-        </div>
-      </div>
+      </section>
 
       {filterStartDate && !filterError && (
-        <div className="panel availability-panel">
+        <section className="panel availability-panel">
           <div className="availability-header">
             <div>
-              <span className="eyebrow">Disponibilidade</span>
+              <span className="eyebrow">Resultado</span>
               <h2>Situação dos laboratórios</h2>
-              <p className="muted">
-                Resultado considerando somente agendamentos confirmados que conflitam com a consulta.
-              </p>
+              <p className="muted">A recorrência semanal de cada reserva é considerada no cálculo.</p>
             </div>
-
             <div className="availability-totals">
-              <span className="availability-total available">
-                {availabilitySummary.available} disponíveis
-              </span>
-              <span className="availability-total occupied">
-                {availabilitySummary.occupied} ocupados
-              </span>
+              <span className="availability-total available">{availabilitySummary.available} disponíveis</span>
+              <span className="availability-total occupied">{availabilitySummary.occupied} ocupados</span>
             </div>
           </div>
-
           <div className="availability-grid">
             {availability.map((item) => (
-              <article
-                className={`availability-card ${item.occupied ? 'occupied' : 'available'}`}
-                key={item.room.id}
-              >
+              <article className={`availability-card ${item.occupied ? 'occupied' : 'available'}`} key={item.room.id}>
                 <div className="availability-card-heading">
                   <strong>{item.room.name}</strong>
                   <span className={`availability-status ${item.occupied ? 'occupied' : 'available'}`}>
                     {item.occupied ? 'Ocupado' : 'Disponível'}
                   </span>
                 </div>
-
-                <span className="availability-room-meta">
-                  {item.room.location} • {item.room.capacity} lugares
-                </span>
-
-                {item.occupied ? (
-                  <p>
-                    {item.conflictCount} reserva{item.conflictCount === 1 ? '' : 's'} conflitante{item.conflictCount === 1 ? '' : 's'}.
-                    {item.latestConflictDate && (
-                      <> Há reserva(s) até <strong>{formatDateBr(item.latestConflictDate)}</strong>.</>
-                    )}
-                  </p>
-                ) : (
-                  <p>Sem reservas conflitantes para o dia, período e horário consultados.</p>
-                )}
+                <span className="availability-room-meta">{item.room.location} • {item.room.capacity} lugares</span>
+                <p>
+                  {item.occupied
+                    ? `${item.conflictCount} reserva(s) compatível(is) com a consulta${item.latestConflictDate ? ` • registros até ${formatDateBr(item.latestConflictDate)}` : ''}`
+                    : 'Sem reservas conflitantes para a consulta realizada.'}
+                </p>
               </article>
             ))}
           </div>
-        </div>
+        </section>
       )}
 
-      {!filterStartDate && hasFilters && !filterError && (
-        <div className="filter-hint panel">
-          <CalendarRange size={18} />
-          <span>
-            Para identificar quais laboratórios estão <strong>disponíveis ou ocupados</strong>, selecione também um dia ou período.
-          </span>
-        </div>
-      )}
+      {error && <div className="error page-error">{error}</div>}
 
-      <div className="panel table-wrap">
+      <section className="panel">
         <div className="table-heading">
           <div>
-            <h2>Agendamentos encontrados</h2>
-            <p className="muted">A tabela abaixo acompanha os filtros selecionados acima.</p>
+            <span className="eyebrow">Reservas</span>
+            <h2>{filteredBookings.length} agendamento(s) encontrado(s)</h2>
           </div>
         </div>
 
         {loading ? (
           <p className="muted">Carregando agendamentos...</p>
+        ) : filteredBookings.length === 0 ? (
+          <div className="empty">Nenhum agendamento encontrado para os filtros informados.</div>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Período</th>
-                <th>Sala</th>
-                <th>Horário diário</th>
-                {isMaster && <th>Responsável</th>}
-                <th>Finalidade</th>
-                <th>Status</th>
-                {isMaster && <th>Ação</th>}
-              </tr>
-            </thead>
-
-            <tbody>
-              {filteredBookings.length === 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
                 <tr>
-                  <td colSpan={isMaster ? 7 : 5} className="empty">
-                    {filterError
-                      ? 'Corrija os filtros informados.'
-                      : hasFilters
-                        ? 'Nenhum agendamento corresponde aos filtros selecionados.'
-                        : 'Nenhum agendamento cadastrado.'}
-                  </td>
+                  <th>Laboratório</th>
+                  <th>Período</th>
+                  <th>Dias</th>
+                  <th>Horário</th>
+                  <th>Softwares</th>
+                  {isMaster && <th>Responsável</th>}
+                  <th>Status</th>
+                  {isMaster && <th>Ação</th>}
                 </tr>
-              )}
+              </thead>
+              <tbody>
+                {filteredBookings.map((booking) => {
+                  const room = rooms.find((item) => item.id === booking.roomId);
+                  const days = WEEKDAYS.filter((day) => booking.weekdays.includes(day.code)).map((day) => day.short).join(', ');
+                  const softwareList = booking.softwareIds.map((id) => softwareNames.get(id) || id).join(', ');
 
-              {filteredBookings.map((booking) => (
-                <tr key={booking.id}>
-                  <td>{formatPeriod(booking.startDate, booking.endDate)}</td>
-
-                  <td>
-                    {rooms.find((room) => room.id === booking.roomId)?.name || booking.roomId}
-                  </td>
-
-                  <td>
-                    {booking.startTime} – {booking.endTime}
-                  </td>
-
-                  {isMaster && (
-                    <td>
-                      <strong>{booking.responsible || 'Não informado'}</strong>
-                      {booking.emailResponsible && (
-                        <span className="cell-secondary">{booking.emailResponsible}</span>
+                  return (
+                    <tr key={booking.id}>
+                      <td><strong>{room?.name || booking.roomId}</strong></td>
+                      <td>{formatDateBr(booking.startDate)} → {formatDateBr(booking.endDate)}</td>
+                      <td>{days}</td>
+                      <td>{booking.startTime} – {booking.endTime}</td>
+                      <td>{softwareList || 'Nenhum informado'}</td>
+                      {isMaster && (
+                        <td>
+                          {booking.responsible || '—'}
+                          {booking.emailResponsible && <span className="cell-secondary">{booking.emailResponsible}</span>}
+                        </td>
                       )}
-                    </td>
-                  )}
-
-                  <td>{booking.purpose}</td>
-
-                  <td>
-                    <span className={`badge ${booking.status === 'Cancelado' ? 'danger' : ''}`}>
-                      {booking.status}
-                    </span>
-                  </td>
-
-                  {isMaster && (
-                    <td>
-                      {booking.status === 'Confirmado' ? (
-                        <button
-                          type="button"
-                          className="link-danger"
-                          onClick={() => cancel(booking.id)}
-                          disabled={cancellingId === booking.id}
-                        >
-                          {cancellingId === booking.id ? 'Cancelando...' : 'Cancelar período'}
-                        </button>
-                      ) : (
-                        <span className="muted">—</span>
+                      <td><span className={`badge ${booking.status === 'Cancelado' ? 'danger' : ''}`}>{booking.status}</span></td>
+                      {isMaster && (
+                        <td>
+                          {booking.status === 'Confirmado' ? (
+                            <button type="button" className="link-danger" onClick={() => cancel(booking.id)} disabled={cancellingId === booking.id}>
+                              {cancellingId === booking.id ? 'Cancelando...' : 'Cancelar'}
+                            </button>
+                          ) : '—'}
+                        </td>
                       )}
-                    </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
-      </div>
+      </section>
     </section>
   );
 }

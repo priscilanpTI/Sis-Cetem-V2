@@ -1,9 +1,19 @@
-import type { Booking, CreateBookingInput, MasterSession, Room } from '../types';
+import type {
+  Booking,
+  BookingConflict,
+  CreateBookingInput,
+  MasterSession,
+  Room,
+  Software,
+  WeekdayCode
+} from '../types';
 
 const API_URL = import.meta.env.VITE_APPS_SCRIPT_URL?.trim();
 
 const MASTER_TOKEN_KEY = 'agenda-salas-master-token';
 const MASTER_USER_KEY = 'agenda-salas-master-user';
+
+const ALL_WEEKDAYS: WeekdayCode[] = ['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB'];
 
 type ApiBase = {
   sucesso: boolean;
@@ -16,6 +26,12 @@ type ApiListResponse<T> = ApiBase & {
 
 type ApiCreateResponse = ApiBase & {
   id?: string;
+  conflitos?: Array<{
+    data?: string;
+    agendamento_id?: string;
+    hora_inicio?: string;
+    hora_fim?: string;
+  }>;
 };
 
 type ApiLoginResponse = ApiBase & {
@@ -36,16 +52,23 @@ type ApiRoom = {
   status: string;
 };
 
+type ApiSoftware = {
+  id: string;
+  nome: string;
+  status: string;
+};
+
 type ApiBooking = {
   id: string;
   sala_id: string;
   data_inicio: string;
   data_fim: string;
+  dias_semana?: string | string[];
   hora_inicio: string;
   hora_fim: string;
   responsavel?: string;
   email_responsavel?: string;
-  finalidade: string;
+  softwares?: string | string[];
   observacao?: string;
   status: string;
   criado_em?: string;
@@ -74,9 +97,13 @@ async function parseResponse<T>(response: Response): Promise<T> {
   }
 }
 
-async function get<T>(acao: string): Promise<ApiListResponse<T>> {
+async function get<T>(
+  acao: string,
+  params: Record<string, string> = {}
+): Promise<ApiListResponse<T>> {
   const url = new URL(getApiUrl());
   url.searchParams.set('acao', acao);
+  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
   url.searchParams.set('_', String(Date.now()));
 
   const response = await fetch(url.toString(), {
@@ -89,7 +116,6 @@ async function get<T>(acao: string): Promise<ApiListResponse<T>> {
 }
 
 async function post<T extends ApiBase>(payload: Record<string, unknown>): Promise<T> {
-  // text/plain mantém a requisição simples e evita preflight no Web App do Apps Script.
   const response = await fetch(getApiUrl(), {
     method: 'POST',
     headers: {
@@ -112,19 +138,48 @@ function mapRoom(room: ApiRoom): Room {
   };
 }
 
+function mapSoftware(software: ApiSoftware): Software {
+  return {
+    id: String(software.id),
+    name: String(software.nome),
+    status: String(software.status).toUpperCase() === 'ATIVO' ? 'Ativo' : 'Inativo'
+  };
+}
+
+function parseCsv(value?: string | string[]): string[] {
+  if (Array.isArray(value)) {
+    return value.map(String).map((item) => item.trim()).filter(Boolean);
+  }
+
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseWeekdays(value?: string | string[]): WeekdayCode[] {
+  const values = parseCsv(value).map((item) => item.toUpperCase());
+  const valid = values.filter((item): item is WeekdayCode =>
+    ALL_WEEKDAYS.includes(item as WeekdayCode)
+  );
+
+  return valid.length > 0 ? valid : ALL_WEEKDAYS;
+}
+
 function mapBooking(booking: ApiBooking): Booking {
   return {
     id: String(booking.id),
     roomId: String(booking.sala_id),
     startDate: String(booking.data_inicio).slice(0, 10),
     endDate: String(booking.data_fim).slice(0, 10),
+    weekdays: parseWeekdays(booking.dias_semana),
     startTime: String(booking.hora_inicio).slice(0, 5),
     endTime: String(booking.hora_fim).slice(0, 5),
     responsible: booking.responsavel ? String(booking.responsavel) : undefined,
     emailResponsible: booking.email_responsavel
       ? String(booking.email_responsavel)
       : undefined,
-    purpose: String(booking.finalidade || ''),
+    softwareIds: parseCsv(booking.softwares),
     notes: booking.observacao ? String(booking.observacao) : undefined,
     status:
       String(booking.status).toUpperCase() === 'CANCELADO'
@@ -171,6 +226,30 @@ export const roomService = {
   }
 };
 
+export const softwareService = {
+  async listAll(): Promise<Software[]> {
+    const result = await get<ApiSoftware>('softwares');
+
+    if (!result.sucesso) {
+      throw new Error(result.mensagem || 'Não foi possível carregar os softwares.');
+    }
+
+    return (result.dados || []).map(mapSoftware).filter((item) => item.status === 'Ativo');
+  },
+
+  async listByRoom(roomId: string): Promise<Software[]> {
+    if (!roomId) return [];
+
+    const result = await get<ApiSoftware>('softwaresPorSala', { sala_id: roomId });
+
+    if (!result.sucesso) {
+      throw new Error(result.mensagem || 'Não foi possível carregar os softwares do laboratório.');
+    }
+
+    return (result.dados || []).map(mapSoftware).filter((item) => item.status === 'Ativo');
+  }
+};
+
 export const bookingService = {
   async list(): Promise<Booking[]> {
     const result = await get<ApiBooking>('agendamentos');
@@ -211,16 +290,28 @@ export const bookingService = {
       sala_id: input.roomId,
       data_inicio: input.startDate,
       data_fim: input.endDate,
+      dias_semana: input.weekdays,
       hora_inicio: input.startTime,
       hora_fim: input.endTime,
       responsavel: input.responsible,
       email_responsavel: input.emailResponsible || '',
-      finalidade: input.purpose,
+      softwares: input.softwareIds,
       observacao: input.notes || ''
     });
 
     if (!result.sucesso || !result.id) {
-      throw new Error(result.mensagem || 'Não foi possível criar o agendamento.');
+      const error = new Error(result.mensagem || 'Não foi possível criar o agendamento.') as Error & {
+        conflicts?: BookingConflict[];
+      };
+
+      error.conflicts = (result.conflitos || []).map((item) => ({
+        date: String(item.data || ''),
+        bookingId: item.agendamento_id ? String(item.agendamento_id) : undefined,
+        startTime: item.hora_inicio ? String(item.hora_inicio) : undefined,
+        endTime: item.hora_fim ? String(item.hora_fim) : undefined
+      }));
+
+      throw error;
     }
 
     return {
@@ -228,11 +319,12 @@ export const bookingService = {
       roomId: input.roomId,
       startDate: input.startDate,
       endDate: input.endDate,
+      weekdays: input.weekdays,
       startTime: input.startTime,
       endTime: input.endTime,
       responsible: input.responsible,
       emailResponsible: input.emailResponsible || '',
-      purpose: input.purpose,
+      softwareIds: input.softwareIds,
       notes: input.notes || '',
       status: 'Confirmado',
       createdAt: new Date().toISOString()
@@ -301,9 +393,7 @@ export const masterService = {
   async validate(): Promise<boolean> {
     const token = getStoredToken();
 
-    if (!token) {
-      return false;
-    }
+    if (!token) return false;
 
     try {
       const result = await post<ApiSessionResponse>({
@@ -312,14 +402,9 @@ export const masterService = {
       });
 
       const valid = Boolean(result.sucesso && result.autenticado);
-
-      if (!valid) {
-        clearSession();
-      }
-
+      if (!valid) clearSession();
       return valid;
     } catch {
-      clearSession();
       return false;
     }
   },
@@ -337,9 +422,5 @@ export const masterService = {
     } finally {
       clearSession();
     }
-  },
-
-  clear(): void {
-    clearSession();
   }
 };

@@ -1,9 +1,21 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { bookingService, roomService } from '../services/bookingService';
-import type { Room } from '../types';
+import { bookingService, roomService, softwareService } from '../services/bookingService';
+import type { Booking, BookingConflict, Room, Software, WeekdayCode } from '../types';
+import {
+  WEEKDAYS,
+  addDays,
+  bookingOccursOnDate,
+  formatDateBr,
+  generateOccurrences,
+  startOfWeekMonday,
+  timesOverlap
+} from '../utils/bookingDates';
 
 const MAX_PERIOD_DAYS = 30;
+const PLANNER_START_HOUR = 7;
+const PLANNER_END_HOUR = 22;
 
 function getTodayLocal(): string {
   const hoje = new Date();
@@ -20,29 +32,38 @@ function getCurrentTime(): string {
   return `${hora}:${minuto}`;
 }
 
-function addDays(date: string, days: number): string {
-  const [year, month, day] = date.split('-').map(Number);
-  const value = new Date(Date.UTC(year, month - 1, day + days));
-  return value.toISOString().slice(0, 10);
-}
-
 function countPeriodDays(startDate: string, endDate: string): number {
+  if (!startDate || !endDate) return 0;
   const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
   const [endYear, endMonth, endDay] = endDate.split('-').map(Number);
-
   const start = Date.UTC(startYear, startMonth - 1, startDay);
   const end = Date.UTC(endYear, endMonth - 1, endDay);
-
   return Math.floor((end - start) / 86400000) + 1;
+}
+
+function hourLabel(hour: number): string {
+  return `${String(hour).padStart(2, '0')}:00`;
 }
 
 export function NewBooking() {
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [softwares, setSoftwares] = useState<Software[]>([]);
+  const [roomId, setRoomId] = useState('');
+  const [selectedSoftwareIds, setSelectedSoftwareIds] = useState<string[]>([]);
+  const [selectedWeekdays, setSelectedWeekdays] = useState<WeekdayCode[]>([]);
   const [error, setError] = useState('');
-  const [loadingRooms, setLoadingRooms] = useState(true);
+  const [conflicts, setConflicts] = useState<BookingConflict[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingSoftwares, setLoadingSoftwares] = useState(false);
   const [saving, setSaving] = useState(false);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
+  const [plannerWeekStart, setPlannerWeekStart] = useState(() =>
+    startOfWeekMonday(getTodayLocal())
+  );
 
   const navigate = useNavigate();
   const today = getTodayLocal();
@@ -52,78 +73,166 @@ export function NewBooking() {
     [startDate]
   );
 
+  const selectedOccurrences = useMemo(
+    () => generateOccurrences(startDate, endDate, selectedWeekdays),
+    [startDate, endDate, selectedWeekdays]
+  );
+
+  const selectedOccurrencesSet = useMemo(
+    () => new Set(selectedOccurrences),
+    [selectedOccurrences]
+  );
+
+  const roomBookings = useMemo(
+    () => bookings.filter((booking) => booking.roomId === roomId && booking.status === 'Confirmado'),
+    [bookings, roomId]
+  );
+
+  const plannerDays = useMemo(
+    () => Array.from({ length: 7 }, (_, index) => addDays(plannerWeekStart, index)),
+    [plannerWeekStart]
+  );
+
+  const plannerHours = useMemo(
+    () =>
+      Array.from(
+        { length: PLANNER_END_HOUR - PLANNER_START_HOUR },
+        (_, index) => PLANNER_START_HOUR + index
+      ),
+    []
+  );
+
+  const selectedSoftwareLabel = useMemo(() => {
+    if (selectedSoftwareIds.length === 0) return 'Selecione os softwares necessários';
+    const selected = softwares.filter((software) => selectedSoftwareIds.includes(software.id));
+    if (selected.length === 1) return selected[0].name;
+    if (selected.length === 2) return `${selected[0].name} + ${selected[1].name}`;
+    return `${selected.length} softwares selecionados`;
+  }, [selectedSoftwareIds, softwares]);
+
   useEffect(() => {
-    roomService
-      .list()
-      .then(setRooms)
+    Promise.all([roomService.list(), bookingService.list()])
+      .then(([roomList, bookingList]) => {
+        setRooms(roomList);
+        setBookings(bookingList);
+      })
       .catch((e) =>
-        setError(e instanceof Error ? e.message : 'Não foi possível carregar as salas.')
+        setError(e instanceof Error ? e.message : 'Não foi possível carregar a agenda.')
       )
-      .finally(() => setLoadingRooms(false));
+      .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    setSelectedSoftwareIds([]);
+    setSoftwares([]);
+
+    if (!roomId) return;
+
+    setLoadingSoftwares(true);
+    softwareService
+      .listByRoom(roomId)
+      .then(setSoftwares)
+      .catch((e) =>
+        setError(
+          e instanceof Error
+            ? e.message
+            : 'Não foi possível carregar os softwares do laboratório.'
+        )
+      )
+      .finally(() => setLoadingSoftwares(false));
+  }, [roomId]);
 
   function handleStartDateChange(value: string) {
     setStartDate(value);
+    setConflicts([]);
 
     if (!value) {
       setEndDate('');
       return;
     }
 
+    setPlannerWeekStart(startOfWeekMonday(value));
     const maximum = addDays(value, MAX_PERIOD_DAYS - 1);
 
-    if (endDate && (endDate < value || endDate > maximum)) {
-      setEndDate('');
+    if (!endDate || endDate < value || endDate > maximum) {
+      setEndDate(value);
     }
+  }
+
+  function toggleWeekday(code: WeekdayCode) {
+    setSelectedWeekdays((current) =>
+      current.includes(code) ? current.filter((item) => item !== code) : [...current, code]
+    );
+    setConflicts([]);
+  }
+
+  function toggleSoftware(id: string) {
+    setSelectedSoftwareIds((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+    );
+  }
+
+  function getExistingBookingForSlot(date: string, slotStart: string, slotEnd: string) {
+    return roomBookings.find(
+      (booking) =>
+        bookingOccursOnDate(booking, date) &&
+        timesOverlap(booking.startTime, booking.endTime, slotStart, slotEnd)
+    );
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError('');
+    setConflicts([]);
 
     const formData = new FormData(event.currentTarget);
+    const responsible = String(formData.get('responsible') || '').trim();
+    const emailResponsible = String(formData.get('emailResponsible') || '').trim();
+    const notes = String(formData.get('notes') || '').trim();
 
-    const roomId = String(formData.get('roomId') || '');
-    const selectedStartDate = String(formData.get('startDate') || '');
-    const selectedEndDate = String(formData.get('endDate') || '');
-    const startTime = String(formData.get('startTime') || '');
-    const endTime = String(formData.get('endTime') || '');
-    const responsible = String(formData.get('responsible') || '');
-    const emailResponsible = String(formData.get('emailResponsible') || '');
-    const purpose = String(formData.get('purpose') || '');
-    const notes = String(formData.get('notes') || '');
+    if (!roomId) {
+      setError('Selecione um laboratório.');
+      return;
+    }
 
-    if (selectedStartDate < today) {
+    if (!startDate || !endDate) {
+      setError('Informe a data inicial e a data final.');
+      return;
+    }
+
+    if (startDate < today) {
       setError('Não é permitido iniciar um agendamento em uma data anterior à data atual.');
       return;
     }
 
-    if (selectedEndDate < selectedStartDate) {
+    if (endDate < startDate) {
       setError('A data final deve ser igual ou posterior à data inicial.');
       return;
     }
 
-    const periodDays = countPeriodDays(selectedStartDate, selectedEndDate);
-
-    if (periodDays > MAX_PERIOD_DAYS) {
+    if (countPeriodDays(startDate, endDate) > MAX_PERIOD_DAYS) {
       setError(`O período máximo permitido é de ${MAX_PERIOD_DAYS} dias corridos.`);
       return;
     }
 
-    if (startTime >= endTime) {
+    if (selectedWeekdays.length === 0) {
+      setError('Selecione pelo menos um dia da semana para a reserva.');
+      return;
+    }
+
+    if (selectedOccurrences.length === 0) {
+      setError('Os dias da semana selecionados não ocorrem dentro do período informado.');
+      return;
+    }
+
+    if (!startTime || !endTime || startTime >= endTime) {
       setError('O horário final deve ser posterior ao horário inicial.');
       return;
     }
 
-    if (selectedStartDate === today) {
-      const currentTime = getCurrentTime();
-
-      if (startTime <= currentTime) {
-        setError(
-          'Para períodos que começam hoje, o horário inicial deve ser posterior ao horário atual.'
-        );
-        return;
-      }
+    if (selectedOccurrences.includes(today) && startTime <= getCurrentTime()) {
+      setError('Para uma ocorrência de hoje, o horário inicial deve ser posterior ao horário atual.');
+      return;
     }
 
     setSaving(true);
@@ -131,19 +240,22 @@ export function NewBooking() {
     try {
       await bookingService.create({
         roomId,
-        startDate: selectedStartDate,
-        endDate: selectedEndDate,
+        startDate,
+        endDate,
+        weekdays: selectedWeekdays,
         startTime,
         endTime,
         responsible,
         emailResponsible,
-        purpose,
+        softwareIds: selectedSoftwareIds,
         notes
       });
 
       navigate('/agendamentos');
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Não foi possível criar o agendamento.');
+      const typedError = e as Error & { conflicts?: BookingConflict[] };
+      setError(typedError.message || 'Não foi possível criar o agendamento.');
+      setConflicts(typedError.conflicts || []);
     } finally {
       setSaving(false);
     }
@@ -155,16 +267,25 @@ export function NewBooking() {
         <div>
           <span className="eyebrow">Reserva</span>
           <h1>Novo agendamento</h1>
-          <p>Reserve uma sala por um período contínuo de até 30 dias.</p>
+          <p>Escolha o período, os dias da semana, o horário e visualize a ocupação no planner.</p>
         </div>
       </div>
 
-      <form className="panel form-grid" onSubmit={submit}>
+      <form className="panel form-grid booking-form" onSubmit={submit}>
         <label>
-          Sala
-          <select name="roomId" required defaultValue="" disabled={loadingRooms || saving}>
+          Laboratório
+          <select
+            name="roomId"
+            required
+            value={roomId}
+            onChange={(event) => {
+              setRoomId(event.target.value);
+              setConflicts([]);
+            }}
+            disabled={loading || saving}
+          >
             <option value="" disabled>
-              {loadingRooms ? 'Carregando salas...' : 'Selecione uma sala'}
+              {loading ? 'Carregando laboratórios...' : 'Selecione um laboratório'}
             </option>
             {rooms.map((room) => (
               <option key={room.id} value={room.id}>
@@ -176,9 +297,7 @@ export function NewBooking() {
 
         <div className="period-info">
           <strong>Período máximo: 30 dias corridos</strong>
-          <span>
-            As datas inicial e final contam no limite. Ex.: 01/09 a 30/09 = 30 dias.
-          </span>
+          <span>Somente os dias da semana marcados serão efetivamente reservados.</span>
         </div>
 
         <label>
@@ -202,23 +321,73 @@ export function NewBooking() {
             min={startDate || today}
             max={maxEndDate || undefined}
             value={endDate}
-            onChange={(event) => setEndDate(event.target.value)}
+            onChange={(event) => {
+              setEndDate(event.target.value);
+              setConflicts([]);
+            }}
             required
             disabled={saving || !startDate}
           />
           {startDate && maxEndDate && (
-            <span className="field-hint">Data final máxima: {maxEndDate.split('-').reverse().join('/')}</span>
+            <span className="field-hint">Data final máxima: {formatDateBr(maxEndDate)}</span>
           )}
         </label>
 
+        <div className="full form-section">
+          <div className="form-section-heading">
+            <div>
+              <strong>Dias da semana</strong>
+              <span>Marque somente os dias em que o laboratório será utilizado.</span>
+            </div>
+          </div>
+
+          <div className="weekday-selector">
+            {WEEKDAYS.map((day) => {
+              const active = selectedWeekdays.includes(day.code);
+              return (
+                <label className={`weekday-option ${active ? 'selected' : ''}`} key={day.code}>
+                  <input
+                    type="checkbox"
+                    checked={active}
+                    onChange={() => toggleWeekday(day.code)}
+                    disabled={saving}
+                  />
+                  <span className="weekday-check">{active && <Check size={14} />}</span>
+                  <span>{day.short}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
         <label>
           Horário inicial
-          <input type="time" name="startTime" required disabled={saving} />
+          <input
+            type="time"
+            name="startTime"
+            value={startTime}
+            onChange={(event) => {
+              setStartTime(event.target.value);
+              setConflicts([]);
+            }}
+            required
+            disabled={saving}
+          />
         </label>
 
         <label>
           Horário final
-          <input type="time" name="endTime" required disabled={saving} />
+          <input
+            type="time"
+            name="endTime"
+            value={endTime}
+            onChange={(event) => {
+              setEndTime(event.target.value);
+              setConflicts([]);
+            }}
+            required
+            disabled={saving}
+          />
         </label>
 
         <label>
@@ -236,10 +405,52 @@ export function NewBooking() {
           />
         </label>
 
-        <label className="full">
-          Finalidade
-          <input name="purpose" placeholder="Ex.: Aula de Redes" required disabled={saving} />
-        </label>
+        <div className="full form-section">
+          <div className="form-section-heading">
+            <div>
+              <strong>Softwares necessários</strong>
+              <span>As opções são carregadas de acordo com o laboratório selecionado.</span>
+            </div>
+          </div>
+
+          {!roomId ? (
+            <div className="selection-placeholder">Selecione primeiro um laboratório.</div>
+          ) : loadingSoftwares ? (
+            <div className="selection-placeholder">Carregando softwares...</div>
+          ) : softwares.length === 0 ? (
+            <div className="selection-placeholder">
+              Nenhum software foi cadastrado para este laboratório.
+            </div>
+          ) : (
+            <details className="software-select-dropdown">
+              <summary className="software-select-summary">
+                <span>{selectedSoftwareLabel}</span>
+                <ChevronDown size={18} className="software-select-chevron" />
+              </summary>
+
+              <div className="software-select-menu">
+                {softwares.map((software) => {
+                  const active = selectedSoftwareIds.includes(software.id);
+                  return (
+                    <label
+                      className={`software-select-option ${active ? 'selected' : ''}`}
+                      key={software.id}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={active}
+                        onChange={() => toggleSoftware(software.id)}
+                        disabled={saving}
+                      />
+                      <span className="software-select-check">{active && <Check size={14} />}</span>
+                      <span>{software.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </details>
+          )}
+        </div>
 
         <label className="full">
           Observações
@@ -251,17 +462,147 @@ export function NewBooking() {
           />
         </label>
 
+        {(startDate && endDate && selectedWeekdays.length > 0) && (
+          <div className="full occurrence-summary">
+            <div>
+              <CalendarDays size={18} />
+              <strong>{selectedOccurrences.length} encontro(s) no período</strong>
+            </div>
+            {selectedOccurrences.length > 0 ? (
+              <div className="occurrence-chips">
+                {selectedOccurrences.map((date) => (
+                  <span key={date}>{formatDateBr(date)}</span>
+                ))}
+              </div>
+            ) : (
+              <p>Nenhuma ocorrência para os dias escolhidos.</p>
+            )}
+          </div>
+        )}
+
         {error && <div className="error full">{error}</div>}
+
+        {conflicts.length > 0 && (
+          <div className="conflict-list full">
+            <strong>Datas conflitantes:</strong>
+            {conflicts.map((conflict, index) => (
+              <span key={`${conflict.date}-${index}`}>
+                {formatDateBr(conflict.date)}
+                {conflict.startTime && conflict.endTime
+                  ? ` — ocupado de ${conflict.startTime} às ${conflict.endTime}`
+                  : ''}
+              </span>
+            ))}
+          </div>
+        )}
 
         <div className="actions full">
           <button type="button" className="secondary" onClick={() => navigate(-1)} disabled={saving}>
             Voltar
           </button>
-          <button className="primary" type="submit" disabled={saving || loadingRooms}>
+          <button className="primary" type="submit" disabled={saving || loading}>
             {saving ? 'Salvando...' : 'Confirmar agendamento'}
           </button>
         </div>
       </form>
+
+      <section className="panel planner-panel">
+        <div className="planner-toolbar">
+          <div>
+            <span className="eyebrow">Planner</span>
+            <h2>Disponibilidade do laboratório</h2>
+            <p className="muted">
+              {roomId
+                ? 'Navegue pelas semanas para conferir horários ocupados e a sua seleção antes de reservar.'
+                : 'Selecione um laboratório para visualizar a agenda.'}
+            </p>
+          </div>
+
+          <div className="planner-navigation">
+            <button
+              type="button"
+              className="secondary icon-button"
+              onClick={() => setPlannerWeekStart(addDays(plannerWeekStart, -7))}
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <strong>
+              {formatDateBr(plannerDays[0])} – {formatDateBr(plannerDays[6])}
+            </strong>
+            <button
+              type="button"
+              className="secondary icon-button"
+              onClick={() => setPlannerWeekStart(addDays(plannerWeekStart, 7))}
+            >
+              <ChevronRight size={18} />
+            </button>
+          </div>
+        </div>
+
+        <div className="planner-legend">
+          <span><i className="legend-dot available" /> Disponível</span>
+          <span><i className="legend-dot occupied" /> Ocupado</span>
+          <span><i className="legend-dot selected" /> Sua seleção</span>
+          <span><i className="legend-dot conflict" /> Conflito</span>
+        </div>
+
+        {!roomId ? (
+          <div className="planner-empty">Selecione um laboratório acima para carregar o planner.</div>
+        ) : (
+          <div className="planner-scroll">
+            <div className="planner-grid">
+              <div className="planner-corner">Horário</div>
+              {plannerDays.map((date) => (
+                <div className={`planner-day-header ${date === today ? 'today' : ''}`} key={date}>
+                  <strong>{WEEKDAYS.find((item) => item.code === ['DOM','SEG','TER','QUA','QUI','SEX','SAB'][new Date(`${date}T12:00:00`).getDay()])?.short}</strong>
+                  <span>{formatDateBr(date).slice(0, 5)}</span>
+                </div>
+              ))}
+
+              {plannerHours.flatMap((hour) => {
+                const slotStart = hourLabel(hour);
+                const slotEnd = hourLabel(hour + 1);
+                return [
+                  <div className="planner-time" key={`time-${hour}`}>{slotStart}</div>,
+                  ...plannerDays.map((date) => {
+                    const existing = getExistingBookingForSlot(date, slotStart, slotEnd);
+                    const selected =
+                      selectedOccurrencesSet.has(date) &&
+                      Boolean(startTime && endTime) &&
+                      timesOverlap(startTime, endTime, slotStart, slotEnd);
+
+                    const className = existing && selected
+                      ? 'conflict'
+                      : selected
+                        ? 'selected'
+                        : existing
+                          ? 'occupied'
+                          : 'available';
+
+                    return (
+                      <div
+                        className={`planner-slot ${className}`}
+                        key={`${date}-${hour}`}
+                        title={
+                          existing
+                            ? `Ocupado: ${existing.startTime}–${existing.endTime}`
+                            : selected
+                              ? `Sua seleção: ${startTime}–${endTime}`
+                              : 'Disponível'
+                        }
+                      >
+                        {existing && <span>{existing.startTime}–{existing.endTime}</span>}
+                        {!existing && selected && <span>Sua seleção</span>}
+                        {existing && selected && <span>Conflito</span>}
+                      </div>
+                    );
+                  })
+                ];
+              })}
+            </div>
+          </div>
+        )}
+      </section>
     </section>
   );
 }

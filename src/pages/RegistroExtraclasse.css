@@ -1,0 +1,263 @@
+.extraclasse-page {
+  min-height: 100vh;
+  padding: 32px 20px;
+  background: #f5f7fa;
+}
+
+.extraclasse-container {
+  width: 100%;
+  max-width: 1050px;
+  margin: 0 auto;
+}
+
+.extraclasse-header {
+  margin-bottom: 24px;
+}
+
+.extraclasse-header h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+  color: #1f2937;
+}
+
+.extraclasse-header p {
+  margin: 0;
+  color: #6b7280;
+}
+
+.extraclasse-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.form-card {
+  padding: 24px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+}
+
+.form-card h2 {
+  margin: 0 0 20px;
+  font-size: 18px;
+  color: #1f2937;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.campo {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 18px;
+}
+
+.campo:last-child {
+  margin-bottom: 0;
+}
+
+.campo label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.campo small {
+  color: #6b7280;
+}
+
+.campo input,
+.campo select,
+.campo textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 11px 12px;
+  font: inherit;
+  color: #1f2937;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  outline: none;
+}
+
+.campo input:focus,
+.campo select:focus,
+.campo textarea:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.dias-semana {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.dia-opcao {
+  cursor: pointer;
+}
+
+.dia-opcao input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.dia-opcao span {
+  display: block;
+  min-width: 82px;
+  padding: 10px 13px;
+  text-align: center;
+  color: #4b5563;
+  background: #f9fafb;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  transition: 0.15s ease;
+}
+
+.dia-opcao.selecionado span {
+  color: #ffffff;
+  background: #2563eb;
+  border-color: #2563eb;
+}
+
+.resumo-extraclasse {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+
+.resumo-extraclasse > div {
+  padding: 18px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+}
+
+.resumo-extraclasse span {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.resumo-extraclasse strong {
+  font-size: 22px;
+  color: #1f2937;
+}
+
+.resumo-extraclasse .total {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.resumo-extraclasse .total strong {
+  color: #1d4ed8;
+}
+
+.datas-calculadas {
+  padding: 18px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+}
+
+.datas-lista {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.datas-lista span {
+  padding: 6px 10px;
+  font-size: 13px;
+  color: #374151;
+  background: #f3f4f6;
+  border-radius: 6px;
+}
+
+.acoes-form {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.botao-principal,
+.botao-secundario {
+  cursor: pointer;
+  padding: 11px 20px;
+  font: inherit;
+  font-weight: 600;
+  border-radius: 8px;
+}
+
+.botao-principal {
+  color: #ffffff;
+  background: #2563eb;
+  border: 1px solid #2563eb;
+}
+
+.botao-secundario {
+  color: #374151;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+}
+
+.botao-principal:disabled,
+.botao-secundario:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.alerta {
+  margin-bottom: 18px;
+  padding: 13px 16px;
+  border-radius: 8px;
+}
+
+.alerta-erro {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+.alerta-sucesso {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.carregando {
+  padding: 30px;
+  text-align: center;
+  background: #ffffff;
+  border-radius: 12px;
+}
+
+@media (max-width: 700px) {
+  .form-grid,
+  .resumo-extraclasse {
+    grid-template-columns: 1fr;
+  }
+
+  .extraclasse-page {
+    padding: 20px 12px;
+  }
+
+  .form-card {
+    padding: 18px;
+  }
+
+  .acoes-form {
+    flex-direction: column-reverse;
+  }
+
+  .botao-principal,
+  .botao-secundario {
+    width: 100%;
+  }
+}

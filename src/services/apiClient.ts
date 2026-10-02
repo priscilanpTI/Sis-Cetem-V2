@@ -5,9 +5,17 @@ export type ApiBase = {
   mensagem?: string;
 };
 
+export function isApiConfigured(): boolean {
+  return API_URL.length > 0;
+}
+
+export function apiMissingMessage(): string {
+  return 'Integração com o Apps Script não configurada. Crie um arquivo .env ao lado do .env.example com a variável VITE_APPS_SCRIPT_URL apontando para o Web App implantado no Google Apps Script e reinicie o servidor Vite.';
+}
+
 function getApiUrl(): string {
-  if (!API_URL) {
-    throw new Error('URL da API não configurada. Defina VITE_APPS_SCRIPT_URL no arquivo .env.');
+  if (!isApiConfigured()) {
+    throw new Error(apiMissingMessage());
   }
   return API_URL;
 }
@@ -76,6 +84,10 @@ export async function apiGet<T extends ApiBase>(
   params: Record<string, string> = {},
   cache?: { key: string; ttlMs: number }
 ): Promise<T> {
+  if (!isApiConfigured()) {
+    return Promise.resolve({ sucesso: false, mensagem: apiMissingMessage() } as T);
+  }
+
   if (cache) {
     const cached = getSessionCache<T>(cache.key);
     if (cached) return cached;
@@ -85,23 +97,40 @@ export async function apiGet<T extends ApiBase>(
   url.searchParams.set('acao', acao);
   Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
 
-  const response = await fetch(url.toString(), {
-    method: 'GET',
-    redirect: 'follow',
-  });
-  const parsed = await parseJson<T>(response);
+  try {
+    const response = await fetch(url.toString(), {
+      method: 'GET',
+      redirect: 'follow',
+    });
+    const parsed = await parseJson<T>(response);
 
-  if (cache && parsed.sucesso) setSessionCache(cache.key, parsed, cache.ttlMs);
-  return parsed;
+    if (cache && parsed.sucesso) setSessionCache(cache.key, parsed, cache.ttlMs);
+    return parsed;
+  } catch (err) {
+    return {
+      sucesso: false,
+      mensagem: err instanceof Error ? err.message : 'Falha de comunicação com a API.',
+    } as T;
+  }
 }
 
 export async function apiPost<T extends ApiBase>(payload: Record<string, unknown>): Promise<T> {
-  const response = await fetch(getApiUrl(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(payload),
-    redirect: 'follow',
-  });
+  if (!isApiConfigured()) {
+    return Promise.resolve({ sucesso: false, mensagem: apiMissingMessage() } as T);
+  }
 
-  return parseJson<T>(response);
+  try {
+    const response = await fetch(getApiUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload),
+      redirect: 'follow',
+    });
+    return parseJson<T>(response);
+  } catch (err) {
+    return {
+      sucesso: false,
+      mensagem: err instanceof Error ? err.message : 'Falha de comunicação com a API.',
+    } as T;
+  }
 }

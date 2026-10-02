@@ -1,16 +1,12 @@
-# Google Apps Script
+# Google Apps Script — versão final
 
-O arquivo `Code.gs` contém a API completa para:
+Arquivos necessários no mesmo projeto:
 
-- listar salas;
-- listar agendamentos;
-- criar agendamento;
-- impedir conflito de horários;
-- cancelar agendamento.
+- `Code.gs`
+- `Funcionarios.gs`
+- `MapaCompetencias.gs`
+- `CargaInicialMapaCompetencias.gs`
 
-Depois de substituir o código do projeto Apps Script:
+Não mantenha `RotasMapaCompetencias.gs`: as rotas já estão no `Code.gs`.
 
-1. salve;
-2. execute `configurarProjeto()` uma vez;
-3. teste `testarLeituraSalas()`;
-4. publique uma nova versão do Web App.
+Após substituir os arquivos, siga a ordem descrita em `../ATUALIZACAO_FINAL.md`.

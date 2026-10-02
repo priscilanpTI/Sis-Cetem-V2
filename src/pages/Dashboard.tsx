@@ -40,7 +40,17 @@ export function Dashboard() {
   const softwareNames = useMemo(() => new Map(softwares.map((item) => [item.id, item.name])), [softwares]);
 
   if (loading) {
-    return <section><div className="panel"><p className="muted">Carregando dashboard...</p></div></section>;
+    return (
+      <section>
+        <div className="skeleton-grid">
+          <div className="skeleton-card"><div className="skeleton-line short" /><div className="skeleton-line" /></div>
+          <div className="skeleton-card"><div className="skeleton-line short" /><div className="skeleton-line" /></div>
+          <div className="skeleton-card"><div className="skeleton-line short" /><div className="skeleton-line" /></div>
+          <div className="skeleton-card"><div className="skeleton-line short" /><div className="skeleton-line" /></div>
+        </div>
+        <div className="skeleton-big" />
+      </section>
+    );
   }
 
   return (

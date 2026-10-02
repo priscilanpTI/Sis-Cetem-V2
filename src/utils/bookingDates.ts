@@ -62,15 +62,24 @@ export function generateOccurrences(
 
   const allowed = new Set(weekdays);
   const result: string[] = [];
-  let current = startDate;
+  const start = parseLocalDate(startDate);
+  const end = parseLocalDate(endDate);
 
-  while (current <= endDate) {
-    if (allowed.has(weekdayCodeForDate(current))) {
-      result.push(current);
+  for (const weekday of weekdays) {
+    const targetJsDay = JS_DAY_TO_CODE.indexOf(weekday);
+    const current = new Date(start);
+    const diff = (targetJsDay - current.getDay() + 7) % 7;
+    current.setDate(current.getDate() + diff);
+
+    while (current <= end) {
+      if (allowed.has(weekdayCodeForDate(formatLocalDate(current)))) {
+        result.push(formatLocalDate(current));
+      }
+      current.setDate(current.getDate() + 7);
     }
-    current = addDays(current, 1);
   }
 
+  result.sort();
   return result;
 }
 
@@ -102,10 +111,18 @@ export function bookingMatchesDateRange(
 
   if (overlapEnd < overlapStart) return false;
 
-  let current = overlapStart;
-  while (current <= overlapEnd) {
-    if (booking.weekdays.includes(weekdayCodeForDate(current))) return true;
-    current = addDays(current, 1);
+  const allowedWeekdays = new Set(booking.weekdays);
+  const startJsDate = parseLocalDate(overlapStart);
+  const endJsDate = parseLocalDate(overlapEnd);
+
+  for (const weekdayCode of booking.weekdays) {
+    const targetJsDay = JS_DAY_TO_CODE.indexOf(weekdayCode);
+    const candidate = new Date(startJsDate);
+    const diff = (targetJsDay - candidate.getDay() + 7) % 7;
+    candidate.setDate(candidate.getDate() + diff);
+    if (candidate <= endJsDate) {
+      return true;
+    }
   }
 
   return false;

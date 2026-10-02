@@ -1,32 +1,50 @@
-# Agenda de Salas
+# SGD — Sistema de Gestão Docente
 
-Primeira versão funcional do módulo independente de agendamento de salas.
+Versão final consolidada com Agenda de Salas, Atividades Extraclasse e Mapa de Competências.
 
-## Estado atual
-- React + TypeScript + Vite
-- Dashboard
-- Cadastro de agendamentos
-- Listagem e cancelamento
-- Regra de conflito de horários
-- Salas mockadas
-- Agendamentos temporariamente persistidos no localStorage
+## Alterações desta versão
 
-O `localStorage` é usado apenas nesta etapa de desenvolvimento para permitir testar o fluxo completo. A camada `bookingService` foi isolada para ser substituída pela integração Google Apps Script + Google Sheets sem alterar as páginas.
+- Login **Master único e global** no menu lateral. A mesma sessão habilita:
+  - dados completos e cancelamento em Agendamentos;
+  - Relatório Extraclasse;
+  - Relatório do Mapa de Competências.
+- Matrícula deixou de ser preenchida automaticamente. O usuário digita a matrícula e o Apps Script valida no servidor.
+- A lista pública de funcionários contém somente **ID interno + nome**. Matrículas e e-mails não são enviados em listas ao navegador.
+- Depois de validar funcionário + matrícula, o e-mail oficial é retornado e preenchido como somente leitura.
+- Novo Agendamento, Extraclasse e Mapa usam lista suspensa de funcionários.
+- Mapa de Competências permite selecionar **vários cursos por checkbox** e faz a união das UCs sem duplicá-las.
+- Nova aba `FUNCIONARIOS_CURSOS` registra os cursos efetivamente selecionados pelo instrutor.
+- Confirmações por e-mail para:
+  - novo agendamento;
+  - atividade extraclasse;
+  - mapa de competências;
+  - cancelamento de agendamento pelo Master.
+- Otimizações:
+  - cache no navegador para catálogos estáticos;
+  - `CacheService` no Apps Script para funcionários, salas, softwares, categorias e catálogo do mapa;
+  - atualização em lote no Mapa de Competências;
+  - sessão Master validada uma única vez por sessão do navegador.
 
-## Rodar
+## Front-end
+
 ```bash
 npm install
 npm run dev
 ```
 
-## Próxima etapa
-1. Criar Google Sheet com abas SALAS e AGENDAMENTOS.
-2. Criar Web App no Google Apps Script.
-3. Implementar endpoints/listagem, criação, atualização e cancelamento.
-4. Substituir a implementação de `src/services/bookingService.ts` por chamadas HTTP ao Apps Script.
+A URL do Web App fica em `.env`:
 
-## Versão 0.2 — integração com Google Apps Script
+```env
+VITE_APPS_SCRIPT_URL=https://script.google.com/macros/s/SEU_ID/exec
+```
 
-Esta versão usa a variável `VITE_APPS_SCRIPT_URL` do arquivo `.env` para carregar salas e agendamentos e para criar/cancelar reservas no Google Sheets.
+## Google Apps Script
 
-Antes de usar o botão Cancelar, siga `GOOGLE_APPS_SCRIPT_CANCELAMENTO.md` e publique uma nova versão do Web App.
+Use somente os arquivos da pasta `google-apps-script/`:
+
+- `Code.gs`
+- `Funcionarios.gs`
+- `MapaCompetencias.gs`
+- `CargaInicialMapaCompetencias.gs`
+
+Consulte `ATUALIZACAO_FINAL.md` antes de publicar a nova versão.

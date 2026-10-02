@@ -2,32 +2,64 @@
  * ============================================================
  * AGENDA DE SALAS - SGD
  * Google Apps Script + Google Sheets
- * Versão 3.0 - recorrência semanal + softwares por laboratório
+ * Versão 3.3.0 - privacidade + e-mails + master global + otimizações
  * ============================================================
  */
 
 const CONFIG = Object.freeze({
+  // Abas principais
   ABA_SALAS: 'SALAS',
   ABA_AGENDAMENTOS: 'AGENDAMENTOS',
   ABA_SOFTWARES: 'SOFTWARES',
   ABA_SALAS_SOFTWARES: 'SALAS_SOFTWARES',
+
+  // Módulo Extraclasse
+  ABA_FUNCIONARIOS: 'FUNCIONARIOS',
+  ABA_CATEGORIAS_EXTRACLASSE: 'CATEGORIAS_EXTRACLASSE',
+  ABA_ATIVIDADES_EXTRACLASSE: 'ATIVIDADES_EXTRACLASSE',
+
+  // Status
   STATUS_SALA_ATIVA: 'ATIVA',
   STATUS_SOFTWARE_ATIVO: 'ATIVO',
+  STATUS_ATIVO: 'ATIVO',
   STATUS_CONFIRMADO: 'CONFIRMADO',
   STATUS_CANCELADO: 'CANCELADO',
-  LOCK_TIMEOUT_MS: 10000,
-  MASTER_SESSION_SECONDS: 21600,
+
+  // Regras do sistema
   PERIODO_MAX_DIAS: 30,
-  MASTER_USUARIO_PADRAO: 'cetem.sis.ti',
-  API_VERSION: '3.0.0'
+  LOCK_TIMEOUT_MS: 10000,
+
+  // Master
+  MASTER_USUARIO_PADRAO: 'master',
+  MASTER_SESSION_SECONDS: 21600, // 6 horas
+
+  // API
+  API_VERSION: '3.3.0'
 });
 
+// Formato canônico utilizado internamente por Agendamentos e Extraclasse.
 const DIAS_SEMANA = Object.freeze(['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB']);
 
 const CABECALHOS = Object.freeze({
-  SALAS: ['id', 'nome', 'capacidade', 'localizacao', 'status'],
-  SOFTWARES: ['id', 'nome', 'status'],
-  SALAS_SOFTWARES: ['sala_id', 'software_id'],
+  SALAS: [
+    'id',
+    'nome',
+    'capacidade',
+    'localizacao',
+    'status'
+  ],
+
+  SOFTWARES: [
+    'id',
+    'nome',
+    'status'
+  ],
+
+  SALAS_SOFTWARES: [
+    'sala_id',
+    'software_id'
+  ],
+
   AGENDAMENTOS: [
     'id',
     'sala_id',
@@ -43,6 +75,36 @@ const CABECALHOS = Object.freeze({
     'status',
     'criado_em',
     'atualizado_em'
+  ],
+
+  FUNCIONARIOS: [
+    'id',
+    'matricula',
+    'nome',
+    'email',
+    'status'
+  ],
+
+  CATEGORIAS_EXTRACLASSE: [
+    'id',
+    'categoria',
+    'status'
+  ],
+
+  ATIVIDADES_EXTRACLASSE: [
+    'id',
+    'nome',
+    'matricula',
+    'data_inicio',
+    'data_fim',
+    'dias_semana',
+    'datas_realizadas',
+    'categoria',
+    'carga_horaria_diaria',
+    'qtd_dias',
+    'carga_horaria_total',
+    'descricao',
+    'criado_em'
   ]
 });
 
@@ -73,7 +135,33 @@ function prepararVersao06() {
   criarEstruturaSoftwares();
   migrarAgendamentosVersao06();
   SpreadsheetApp.flush();
+  sgdLimparCacheCatalogos();
   console.log('Versão 0.6 preparada com sucesso.');
+}
+
+
+/**
+ * EXECUTE UMA VEZ após colar esta versão completa.
+ * É seguro executar novamente: as funções de criação são idempotentes
+ * e a migração de AGENDAMENTOS só ocorre se a estrutura ainda for antiga.
+ */
+function prepararSistemaCompleto() {
+  configurarProjeto();
+  criarEstruturaSoftwares();
+  migrarAgendamentosVersao06();
+  migrarCadastroFuncionarios();
+  configurarModuloExtraclasse();
+
+  if (typeof configurarModuloMapaCompetencias === 'function') {
+    configurarModuloMapaCompetencias();
+  }
+
+  SpreadsheetApp.flush();
+
+  return {
+    sucesso: true,
+    mensagem: 'Sistema preparado: agenda, softwares, extraclasse e mapa de competências.'
+  };
 }
 
 function criarEstruturaSoftwares() {
@@ -251,16 +339,39 @@ function normalizarLista(valor) {
     .filter(Boolean);
 }
 
+function removerAcentos(texto) {
+  return normalizarTexto(texto)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
 function normalizarDiasSemana(valor) {
-  const dias = normalizarLista(valor).map(item => item.toUpperCase());
-  const unicos = [...new Set(dias)];
-  const invalidos = unicos.filter(item => !DIAS_SEMANA.includes(item));
+  const aliases = {
+    DOM: 'DOM', DOMINGO: 'DOM',
+    SEG: 'SEG', SEGUNDA: 'SEG', 'SEGUNDA-FEIRA': 'SEG', 'SEGUNDA FEIRA': 'SEG',
+    TER: 'TER', TERCA: 'TER', 'TERCA-FEIRA': 'TER', 'TERCA FEIRA': 'TER',
+    QUA: 'QUA', QUARTA: 'QUA', 'QUARTA-FEIRA': 'QUA', 'QUARTA FEIRA': 'QUA',
+    QUI: 'QUI', QUINTA: 'QUI', 'QUINTA-FEIRA': 'QUI', 'QUINTA FEIRA': 'QUI',
+    SEX: 'SEX', SEXTA: 'SEX', 'SEXTA-FEIRA': 'SEX', 'SEXTA FEIRA': 'SEX',
+    SAB: 'SAB', SABADO: 'SAB'
+  };
+
+  const informados = normalizarLista(valor);
+  const convertidos = [];
+  const invalidos = [];
+
+  informados.forEach(item => {
+    const chave = removerAcentos(item).toUpperCase();
+    const codigo = aliases[chave];
+    if (codigo) convertidos.push(codigo);
+    else invalidos.push(item);
+  });
 
   if (invalidos.length) {
     throw new Error('Dias da semana inválidos: ' + invalidos.join(', ') + '.');
   }
 
-  return unicos;
+  return [...new Set(convertidos)];
 }
 
 function normalizarData(data) {
@@ -354,22 +465,67 @@ function gerarDatasOcorrencias(dataInicio, dataFim, diasSemana) {
 }
 
 /* ============================================================
+ * CACHE DE CATÁLOGOS
+ * ============================================================ */
+
+function sgdComCacheJson(chave, segundos, construtor) {
+  const cache = CacheService.getScriptCache();
+
+  try {
+    const salvo = cache.get(chave);
+    if (salvo) return JSON.parse(salvo);
+  } catch (erro) {
+    console.warn('Cache ignorado (' + chave + '): ' + (erro.message || erro));
+  }
+
+  const dados = construtor();
+
+  try {
+    const serializado = JSON.stringify(dados);
+    // O CacheService possui limite por item. Se exceder, apenas seguimos sem cache.
+    if (serializado.length < 90000) cache.put(chave, serializado, segundos || 300);
+  } catch (erro) {
+    console.warn('Não foi possível gravar cache (' + chave + '): ' + (erro.message || erro));
+  }
+
+  return dados;
+}
+
+function sgdLimparCacheCatalogos() {
+  const cache = CacheService.getScriptCache();
+  [
+    'SGD_SALAS',
+    'SGD_SOFTWARES',
+    'SGD_SALAS_SOFTWARES',
+    'SGD_CATEGORIAS_EXTRA',
+    'MC_AREAS',
+    'MC_UCS',
+    'MC_VINCULOS',
+    'MC_MOTIVOS'
+  ].forEach(function (chave) {
+    try { cache.remove(chave); } catch (erro) {}
+  });
+}
+
+/* ============================================================
  * SALAS
  * ============================================================ */
 
 function listarSalas() {
-  const aba = obterAba(CONFIG.ABA_SALAS);
-  const cabecalhos = validarCabecalhos(aba, CABECALHOS.SALAS);
-  const ultimaLinha = aba.getLastRow();
-  if (ultimaLinha < 2) return [];
+  return sgdComCacheJson('SGD_SALAS', 600, function () {
+    const aba = obterAba(CONFIG.ABA_SALAS);
+    const cabecalhos = validarCabecalhos(aba, CABECALHOS.SALAS);
+    const ultimaLinha = aba.getLastRow();
+    if (ultimaLinha < 2) return [];
 
-  return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
-    .filter(linha => normalizarTexto(linha[0]) !== '')
-    .map(linha => {
-      const sala = {};
-      cabecalhos.forEach((cabecalho, indice) => sala[cabecalho] = linha[indice]);
-      return sala;
-    });
+    return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
+      .filter(function (linha) { return normalizarTexto(linha[0]) !== ''; })
+      .map(function (linha) {
+        const sala = {};
+        cabecalhos.forEach(function (cabecalho, indice) { sala[cabecalho] = linha[indice]; });
+        return sala;
+      });
+  });
 }
 
 function listarSalasAtivas() {
@@ -388,18 +544,20 @@ function obterSalaPorId(id) {
  * ============================================================ */
 
 function listarSoftwares() {
-  const aba = obterAba(CONFIG.ABA_SOFTWARES);
-  const cabecalhos = validarCabecalhos(aba, CABECALHOS.SOFTWARES);
-  const ultimaLinha = aba.getLastRow();
-  if (ultimaLinha < 2) return [];
+  return sgdComCacheJson('SGD_SOFTWARES', 600, function () {
+    const aba = obterAba(CONFIG.ABA_SOFTWARES);
+    const cabecalhos = validarCabecalhos(aba, CABECALHOS.SOFTWARES);
+    const ultimaLinha = aba.getLastRow();
+    if (ultimaLinha < 2) return [];
 
-  return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
-    .filter(linha => normalizarTexto(linha[0]) !== '')
-    .map(linha => {
-      const item = {};
-      cabecalhos.forEach((cabecalho, indice) => item[cabecalho] = linha[indice]);
-      return item;
-    });
+    return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
+      .filter(function (linha) { return normalizarTexto(linha[0]) !== ''; })
+      .map(function (linha) {
+        const item = {};
+        cabecalhos.forEach(function (cabecalho, indice) { item[cabecalho] = linha[indice]; });
+        return item;
+      });
+  });
 }
 
 function listarSoftwaresAtivos() {
@@ -409,18 +567,22 @@ function listarSoftwaresAtivos() {
 }
 
 function listarVinculosSalasSoftwares() {
-  const aba = obterAba(CONFIG.ABA_SALAS_SOFTWARES);
-  const cabecalhos = validarCabecalhos(aba, CABECALHOS.SALAS_SOFTWARES);
-  const ultimaLinha = aba.getLastRow();
-  if (ultimaLinha < 2) return [];
+  return sgdComCacheJson('SGD_SALAS_SOFTWARES', 600, function () {
+    const aba = obterAba(CONFIG.ABA_SALAS_SOFTWARES);
+    const cabecalhos = validarCabecalhos(aba, CABECALHOS.SALAS_SOFTWARES);
+    const ultimaLinha = aba.getLastRow();
+    if (ultimaLinha < 2) return [];
 
-  return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
-    .filter(linha => normalizarTexto(linha[0]) !== '' && normalizarTexto(linha[1]) !== '')
-    .map(linha => {
-      const item = {};
-      cabecalhos.forEach((cabecalho, indice) => item[cabecalho] = linha[indice]);
-      return item;
-    });
+    return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues()
+      .filter(function (linha) {
+        return normalizarTexto(linha[0]) !== '' && normalizarTexto(linha[1]) !== '';
+      })
+      .map(function (linha) {
+        const item = {};
+        cabecalhos.forEach(function (cabecalho, indice) { item[cabecalho] = linha[indice]; });
+        return item;
+      });
+  });
 }
 
 function listarSoftwaresPorSala(salaId) {
@@ -636,7 +798,17 @@ function criarAgendamento(dados) {
     lock.waitLock(CONFIG.LOCK_TIMEOUT_MS);
     obtido = true;
 
-    const agendamento = validarAgendamento(dados);
+    const funcionario = obterFuncionarioValidado(
+      dados.funcionario_id,
+      dados.matricula
+    );
+
+    const dadosValidados = Object.assign({}, dados, {
+      responsavel: funcionario.nome,
+      email_responsavel: funcionario.email
+    });
+
+    const agendamento = validarAgendamento(dadosValidados);
     const conflitos = encontrarConflitos(
       agendamento.sala_id,
       agendamento.ocorrencias,
@@ -664,8 +836,8 @@ function criarAgendamento(dados) {
       agendamento.dias_semana.join(','),
       agendamento.hora_inicio,
       agendamento.hora_fim,
-      agendamento.responsavel,
-      agendamento.email_responsavel,
+      funcionario.nome,
+      funcionario.email,
       agendamento.softwares.join(','),
       agendamento.observacao,
       CONFIG.STATUS_CONFIRMADO,
@@ -675,11 +847,46 @@ function criarAgendamento(dados) {
 
     SpreadsheetApp.flush();
 
+    const sala = obterSalaPorId(agendamento.sala_id);
+    const nomesSoftwares = listarSoftwaresAtivos()
+      .filter(item => agendamento.softwares.includes(normalizarTexto(item.id).toUpperCase()))
+      .map(item => normalizarTexto(item.nome));
+    const dias = agendamento.dias_semana.join(', ');
+
+    const texto = [
+      'Olá, ' + funcionario.nome + '.',
+      '',
+      'Seu agendamento foi confirmado.',
+      'Laboratório: ' + (sala ? normalizarTexto(sala.nome) : agendamento.sala_id),
+      'Período: ' + agendamento.data_inicio + ' a ' + agendamento.data_fim,
+      'Dias: ' + dias,
+      'Horário: ' + agendamento.hora_inicio + ' - ' + agendamento.hora_fim,
+      'Softwares: ' + (nomesSoftwares.length ? nomesSoftwares.join(', ') : 'Nenhum informado'),
+      'Código: ' + id
+    ].join('\n');
+
+    const email = enviarEmailSgd(
+      funcionario.email,
+      'Confirmação de agendamento - ' + id,
+      texto,
+      '<p>Olá, <strong>' + escaparHtml(funcionario.nome) + '</strong>.</p>' +
+      '<p>Seu agendamento foi confirmado.</p>' +
+      '<ul>' +
+      '<li><strong>Laboratório:</strong> ' + escaparHtml(sala ? sala.nome : agendamento.sala_id) + '</li>' +
+      '<li><strong>Período:</strong> ' + escaparHtml(agendamento.data_inicio) + ' a ' + escaparHtml(agendamento.data_fim) + '</li>' +
+      '<li><strong>Dias:</strong> ' + escaparHtml(dias) + '</li>' +
+      '<li><strong>Horário:</strong> ' + escaparHtml(agendamento.hora_inicio) + ' - ' + escaparHtml(agendamento.hora_fim) + '</li>' +
+      '<li><strong>Softwares:</strong> ' + escaparHtml(nomesSoftwares.length ? nomesSoftwares.join(', ') : 'Nenhum informado') + '</li>' +
+      '<li><strong>Código:</strong> ' + escaparHtml(id) + '</li>' +
+      '</ul>'
+    );
+
     return {
       sucesso: true,
       mensagem: 'Agendamento recorrente realizado com sucesso.',
       id: id,
-      ocorrencias: agendamento.ocorrencias
+      ocorrencias: agendamento.ocorrencias,
+      email_enviado: email.enviado
     };
   } finally {
     if (obtido) lock.releaseLock();
@@ -803,34 +1010,103 @@ function cancelarAgendamento(idAgendamento, token) {
 
     const aba = obterAba(CONFIG.ABA_AGENDAMENTOS);
     const cabecalhos = validarCabecalhos(aba, CABECALHOS.AGENDAMENTOS);
-    const indiceId = cabecalhos.indexOf('id');
-    const indiceStatus = cabecalhos.indexOf('status');
-    const indiceAtualizado = cabecalhos.indexOf('atualizado_em');
+    const indice = {};
+    cabecalhos.forEach((nome, i) => indice[nome] = i);
     const ultimaLinha = aba.getLastRow();
-
     if (ultimaLinha < 2) throw new Error('Nenhum agendamento encontrado.');
 
-    const dados = aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues();
-    const indiceLinha = dados.findIndex(
-      linha => normalizarTexto(linha[indiceId]).toUpperCase() === id.toUpperCase()
-    );
+    const linhas = aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues();
+    const posicao = linhas.findIndex(linha => normalizarTexto(linha[indice.id]).toUpperCase() === id.toUpperCase());
+    if (posicao === -1) throw new Error('Agendamento não encontrado.');
 
-    if (indiceLinha === -1) throw new Error('Agendamento não encontrado.');
-
-    const statusAtual = normalizarTexto(dados[indiceLinha][indiceStatus]).toUpperCase();
+    const registro = linhas[posicao];
+    const statusAtual = normalizarTexto(registro[indice.status]).toUpperCase();
     if (statusAtual === CONFIG.STATUS_CANCELADO) {
       return { sucesso: false, mensagem: 'Este agendamento já está cancelado.' };
     }
 
-    const linhaPlanilha = indiceLinha + 2;
-    aba.getRange(linhaPlanilha, indiceStatus + 1).setValue(CONFIG.STATUS_CANCELADO);
-    aba.getRange(linhaPlanilha, indiceAtualizado + 1).setValue(new Date());
+    const linhaPlanilha = posicao + 2;
+    aba.getRange(linhaPlanilha, indice.status + 1).setValue(CONFIG.STATUS_CANCELADO);
+    aba.getRange(linhaPlanilha, indice.atualizado_em + 1).setValue(new Date());
     SpreadsheetApp.flush();
 
-    return { sucesso: true, mensagem: 'O agendamento recorrente foi cancelado com sucesso.' };
+    const salaId = normalizarTexto(registro[indice.sala_id]);
+    const sala = obterSalaPorId(salaId);
+    const responsavel = normalizarTexto(registro[indice.responsavel]);
+    const emailResponsavel = normalizarTexto(registro[indice.email_responsavel]);
+    const dataInicio = normalizarData(registro[indice.data_inicio]);
+    const dataFim = normalizarData(registro[indice.data_fim]);
+    const horaInicio = normalizarHora(registro[indice.hora_inicio]);
+    const horaFim = normalizarHora(registro[indice.hora_fim]);
+
+    const texto = [
+      'Olá, ' + (responsavel || 'responsável') + '.',
+      '',
+      'O agendamento ' + id + ' foi cancelado pelo usuário Master.',
+      'Laboratório: ' + (sala ? normalizarTexto(sala.nome) : salaId),
+      'Período: ' + dataInicio + ' a ' + dataFim,
+      'Horário: ' + horaInicio + ' - ' + horaFim
+    ].join('\n');
+
+    const email = enviarEmailSgd(
+      emailResponsavel,
+      'Agendamento cancelado - ' + id,
+      texto,
+      '<p>Olá, <strong>' + escaparHtml(responsavel || 'responsável') + '</strong>.</p>' +
+      '<p>O agendamento <strong>' + escaparHtml(id) + '</strong> foi cancelado pelo usuário Master.</p>' +
+      '<ul><li><strong>Laboratório:</strong> ' + escaparHtml(sala ? sala.nome : salaId) + '</li>' +
+      '<li><strong>Período:</strong> ' + escaparHtml(dataInicio) + ' a ' + escaparHtml(dataFim) + '</li>' +
+      '<li><strong>Horário:</strong> ' + escaparHtml(horaInicio) + ' - ' + escaparHtml(horaFim) + '</li></ul>'
+    );
+
+    return {
+      sucesso: true,
+      mensagem: 'O agendamento recorrente foi cancelado com sucesso.',
+      email_enviado: email.enviado
+    };
   } finally {
     if (obtido) lock.releaseLock();
   }
+}
+
+/* ============================================================
+ * RESPOSTAS DA API
+ * ============================================================ */
+
+/**
+ * Converte qualquer objeto simples em resposta JSON do Web App.
+ */
+function respostaJson(dados) {
+  const payload =
+    dados === undefined
+      ? { sucesso: true }
+      : dados;
+
+  return ContentService
+    .createTextOutput(JSON.stringify(payload))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Padroniza erros da API e evita que uma exceção derrube a resposta HTTP.
+ */
+function respostaErro(erro) {
+  const mensagem =
+    erro && erro.message
+      ? erro.message
+      : String(erro || 'Erro interno não identificado.');
+
+  const detalhe =
+    erro && erro.stack
+      ? String(erro.stack)
+      : '';
+
+  console.error(detalhe || mensagem);
+
+  return respostaJson({
+    sucesso: false,
+    mensagem: mensagem
+  });
 }
 
 /* ============================================================
@@ -839,36 +1115,91 @@ function cancelarAgendamento(idAgendamento, token) {
 
 function doGet(e) {
   try {
-    const acao = normalizarTexto(e && e.parameter ? e.parameter.acao : '').toLowerCase();
+    const parametros = e && e.parameter ? e.parameter : {};
+    const acao = normalizarTexto(parametros.acao).toLowerCase();
 
     switch (acao) {
+      /* =========================
+       * MAPA DE COMPETÊNCIAS
+       * ========================= */
+      case 'mapa-dados-iniciais':
+        return respostaJson(
+          obterDadosIniciaisMapaCompetencias()
+        );
+
+      case 'mapa-formulario':
+        return respostaJson({
+          sucesso: false,
+          mensagem: 'Esta rota foi descontinuada. Use a validação segura do funcionário por POST.'
+        });
+
+      /* =========================
+       * AGENDA DE SALAS
+       * ========================= */
       case 'salas':
-        return respostaJson({ sucesso: true, dados: listarSalasAtivas() });
+        return respostaJson({
+          sucesso: true,
+          dados: listarSalasAtivas()
+        });
 
       case 'softwares':
-        return respostaJson({ sucesso: true, dados: listarSoftwaresAtivos() });
+        return respostaJson({
+          sucesso: true,
+          dados: listarSoftwaresAtivos()
+        });
 
       case 'softwaresporsala':
         return respostaJson({
           sucesso: true,
-          dados: listarSoftwaresPorSala(e && e.parameter ? e.parameter.sala_id : '')
+          dados: listarSoftwaresPorSala(
+            parametros.sala_id || ''
+          )
         });
 
       case 'agendamentos':
-        return respostaJson({ sucesso: true, dados: listarAgendamentosPublicos() });
+        return respostaJson({
+          sucesso: true,
+          dados: listarAgendamentosPublicos()
+        });
 
+      /* =========================
+       * FUNCIONÁRIOS / EXTRACLASSE
+       * ========================= */
+      case 'funcionarios-publicos':
+      case 'funcionarios-extraclasse':
+        return respostaJson({
+          sucesso: true,
+          dados: listarFuncionariosPublicos()
+        });
+
+      case 'categorias-extraclasse':
+        return respostaJson({
+          sucesso: true,
+          dados: listarCategoriasExtraclasse()
+        });
+
+      /* =========================
+       * API
+       * ========================= */
       default:
         return respostaJson({
           sucesso: true,
           mensagem: 'API Agenda de Salas - SGD funcionando',
-          versao: CONFIG.API_VERSION,
-          periodoMaximoDias: CONFIG.PERIODO_MAX_DIAS
+          versao:
+            typeof CONFIG.API_VERSION !== 'undefined'
+              ? CONFIG.API_VERSION
+              : 'SGD',
+          periodoMaximoDias:
+            typeof CONFIG.PERIODO_MAX_DIAS !== 'undefined'
+              ? CONFIG.PERIODO_MAX_DIAS
+              : null
         });
     }
   } catch (erro) {
     return respostaErro(erro);
   }
 }
+
 
 function doPost(e) {
   try {
@@ -877,6 +1208,7 @@ function doPost(e) {
     }
 
     let dados;
+
     try {
       dados = JSON.parse(e.postData.contents);
     } catch (erroJson) {
@@ -886,36 +1218,126 @@ function doPost(e) {
     const acao = normalizarTexto(dados.acao);
 
     switch (acao) {
+      /* =========================
+       * MAPA DE COMPETÊNCIAS
+       * ========================= */
+      case 'mapa-validar-funcionario':
+        return respostaJson(
+          obterDadosFuncionarioMapaSeguro(dados)
+        );
+
+      case 'salvarMapaCompetencias':
+        return respostaJson(
+          salvarMapaCompetencias(dados)
+        );
+
+      case 'consultarRelatorioCompetencias':
+        return respostaJson(
+          consultarRelatorioCompetencias(
+            dados.token,
+            dados.filtros || {}
+          )
+        );
+
+      case 'obterFiltrosRelatorioCompetencias':
+        return respostaJson(
+          obterFiltrosRelatorioCompetencias(
+            dados.token
+          )
+        );
+
+      case 'consultarHistoricoCompetencias':
+        return respostaJson(
+          consultarHistoricoCompetencias(
+            dados.token,
+            dados.filtros || {}
+          )
+        );
+
+      /* =========================
+       * FUNCIONÁRIOS
+       * ========================= */
+      case 'validarFuncionario':
+        return respostaJson(
+          validarFuncionarioPrivado(
+            dados.funcionario_id,
+            dados.matricula
+          )
+        );
+
+      /* =========================
+       * AGENDA DE SALAS
+       * ========================= */
       case 'criarAgendamento':
-        return respostaJson(criarAgendamento(dados));
-      case 'loginMaster':
-        return respostaJson(autenticarMaster(dados.usuario, dados.senha));
-      case 'validarSessaoMaster':
-        return respostaJson(verificarSessaoMaster(dados.token));
-      case 'logoutMaster':
-        return respostaJson(logoutMaster(dados.token));
+        return respostaJson(
+          criarAgendamento(dados)
+        );
+
       case 'cancelarAgendamento':
-        return respostaJson(cancelarAgendamento(dados.id, dados.token));
+        return respostaJson(
+          cancelarAgendamento(
+            dados.id,
+            dados.token
+          )
+        );
+
       case 'listarAgendamentosMaster':
-        return respostaJson(listarAgendamentosMaster(dados.token));
+        return respostaJson(
+          listarAgendamentosMaster(
+            dados.token
+          )
+        );
+
+      /* =========================
+       * MASTER
+       * ========================= */
+      case 'loginMaster':
+        return respostaJson(
+          autenticarMaster(
+            dados.usuario,
+            dados.senha
+          )
+        );
+
+      case 'validarSessaoMaster':
+        return respostaJson(
+          verificarSessaoMaster(
+            dados.token
+          )
+        );
+
+      case 'logoutMaster':
+        return respostaJson(
+          logoutMaster(
+            dados.token
+          )
+        );
+
+      /* =========================
+       * EXTRACLASSE
+       * ========================= */
+      case 'registrarAtividadeExtraclasse':
+        return respostaJson(
+          registrarAtividadeExtraclasse(dados)
+        );
+
+      case 'listarRelatorioExtraclasse':
+        return respostaJson(
+          listarRelatorioExtraclasse(
+            dados.filtros || dados,
+            dados.token
+          )
+        );
+
       default:
-        return respostaJson({ sucesso: false, mensagem: 'Ação inválida.' });
+        return respostaJson({
+          sucesso: false,
+          mensagem: 'Ação inválida.'
+        });
     }
   } catch (erro) {
     return respostaErro(erro);
   }
-}
-
-function respostaJson(conteudo) {
-  return ContentService
-    .createTextOutput(JSON.stringify(conteudo))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-function respostaErro(erro) {
-  const mensagem = erro && erro.message ? erro.message : String(erro);
-  console.error(mensagem);
-  return respostaJson({ sucesso: false, mensagem: mensagem });
 }
 
 /* ============================================================
@@ -942,4 +1364,1010 @@ function testarLeituraAgendamentos() {
   const dados = listarAgendamentos();
   console.log(JSON.stringify(dados, null, 2));
   return dados;
+}
+
+function diagnosticarModuloExtraclasse() {
+  const planilha = obterPlanilha();
+
+  const resultado = {
+    planilha: planilha.getName(),
+    funcionarios: null,
+    categorias: null,
+    atividades: null
+  };
+
+  [
+    ['funcionarios', CONFIG.ABA_FUNCIONARIOS, CABECALHOS.FUNCIONARIOS],
+    ['categorias', CONFIG.ABA_CATEGORIAS_EXTRACLASSE, CABECALHOS.CATEGORIAS_EXTRACLASSE],
+    ['atividades', CONFIG.ABA_ATIVIDADES_EXTRACLASSE, CABECALHOS.ATIVIDADES_EXTRACLASSE]
+  ].forEach(([chave, nomeAba, esperados]) => {
+    const aba = planilha.getSheetByName(nomeAba);
+
+    if (!aba) {
+      resultado[chave] = { existe: false };
+      return;
+    }
+
+    let cabecalhosOk = true;
+    let erroCabecalho = '';
+
+    try {
+      validarCabecalhos(aba, esperados);
+    } catch (erro) {
+      cabecalhosOk = false;
+      erroCabecalho = erro.message || String(erro);
+    }
+
+    resultado[chave] = {
+      existe: true,
+      linhasComCabecalho: aba.getLastRow(),
+      cabecalhosOk: cabecalhosOk,
+      erroCabecalho: erroCabecalho
+    };
+  });
+
+  try {
+    resultado.funcionarios.listados = listarFuncionariosExtraclasse();
+  } catch (erro) {
+    resultado.funcionarios.erroLeitura = erro.message || String(erro);
+  }
+
+  try {
+    resultado.categorias.listadas = listarCategoriasExtraclasse();
+  } catch (erro) {
+    resultado.categorias.erroLeitura = erro.message || String(erro);
+  }
+
+  console.log(JSON.stringify(resultado, null, 2));
+  return resultado;
+}
+
+function testarFuncionariosExtraclasse() {
+  const dados = listarFuncionariosExtraclasse();
+  console.log(JSON.stringify(dados, null, 2));
+  return dados;
+}
+
+/* ============================================================
+ * MÓDULO EXTRACLASSE
+ * ============================================================ */
+
+function configurarModuloExtraclasse() {
+
+  migrarCadastroFuncionarios();
+  const planilha = obterPlanilha();
+
+  function criarAbaSeNecessario(nome, cabecalhos) {
+
+    let aba = planilha.getSheetByName(nome);
+
+    if (!aba) {
+      aba = planilha.insertSheet(nome);
+    }
+
+    if (aba.getLastRow() === 0) {
+
+      aba
+        .getRange(
+          1,
+          1,
+          1,
+          cabecalhos.length
+        )
+        .setValues([cabecalhos]);
+
+      aba
+        .getRange(
+          1,
+          1,
+          1,
+          cabecalhos.length
+        )
+        .setFontWeight("bold");
+
+      aba.setFrozenRows(1);
+    }
+
+    return aba;
+  }
+
+
+  const abaFuncionarios =
+    criarAbaSeNecessario(
+      CONFIG.ABA_FUNCIONARIOS,
+      CABECALHOS.FUNCIONARIOS
+    );
+
+
+  const abaCategorias =
+    criarAbaSeNecessario(
+      CONFIG.ABA_CATEGORIAS_EXTRACLASSE,
+      CABECALHOS.CATEGORIAS_EXTRACLASSE
+    );
+
+
+  const abaAtividades =
+    criarAbaSeNecessario(
+      CONFIG.ABA_ATIVIDADES_EXTRACLASSE,
+      CABECALHOS.ATIVIDADES_EXTRACLASSE
+    );
+
+  validarCabecalhos(abaFuncionarios, CABECALHOS.FUNCIONARIOS);
+  validarCabecalhos(abaCategorias, CABECALHOS.CATEGORIAS_EXTRACLASSE);
+  validarCabecalhos(abaAtividades, CABECALHOS.ATIVIDADES_EXTRACLASSE);
+
+
+  /*
+   * Insere categorias iniciais somente
+   * se ainda não existirem registros.
+   */
+
+  if (abaCategorias.getLastRow() < 2) {
+
+    const categorias = [
+      ['CAT-001', 'Planejamento de aulas', 'ATIVO'],
+      ['CAT-002', 'Elaboração de material didático', 'ATIVO'],
+      ['CAT-003', 'Reunião pedagógica', 'ATIVO'],
+      ['CAT-004', 'Capacitação / treinamento', 'ATIVO'],
+      ['CAT-005', 'Atendimento ao aluno', 'ATIVO'],
+      ['CAT-006', 'Participação em evento', 'ATIVO'],
+      ['CAT-007', 'Visita técnica', 'ATIVO'],
+      ['CAT-008', 'Projeto institucional', 'ATIVO'],
+      ['CAT-009', 'Outros', 'ATIVO']
+    ];
+
+    abaCategorias
+      .getRange(
+        2,
+        1,
+        categorias.length,
+        3
+      )
+      .setValues(categorias);
+  }
+
+
+  SpreadsheetApp.flush();
+  sgdLimparCacheCatalogos();
+
+  return {
+    sucesso: true,
+    mensagem:
+      "Módulo de atividades extraclasse configurado com sucesso."
+  };
+}
+
+function listarFuncionariosExtraclasse() {
+  const aba = obterAba(CONFIG.ABA_FUNCIONARIOS);
+  const cabecalhos = validarCabecalhos(aba, CABECALHOS.FUNCIONARIOS);
+  const ultimaLinha = aba.getLastRow();
+
+  if (ultimaLinha < 2) return [];
+
+  const indiceMatricula = cabecalhos.indexOf('matricula');
+  const indiceNome = cabecalhos.indexOf('nome');
+  const indiceStatus = cabecalhos.indexOf('status');
+
+  return aba
+    .getRange(2, 1, ultimaLinha - 1, cabecalhos.length)
+    .getValues()
+    .map(linha => ({
+      matricula: normalizarTexto(linha[indiceMatricula]),
+      nome: normalizarTexto(linha[indiceNome]),
+      status: normalizarTexto(linha[indiceStatus]).toUpperCase()
+    }))
+    .filter(item => {
+      // Matrícula e nome são obrigatórios.
+      if (!item.matricula || !item.nome) return false;
+
+      // Para facilitar o cadastro inicial, status vazio é tratado como ATIVO.
+      // Apenas INATIVO (ou outro status diferente de ATIVO) é excluído.
+      return !item.status || item.status === CONFIG.STATUS_ATIVO;
+    })
+    .map(item => ({
+      matricula: item.matricula,
+      nome: item.nome
+    }))
+    .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+}
+
+function listarCategoriasExtraclasse() {
+  return sgdComCacheJson('SGD_CATEGORIAS_EXTRA', 600, function () {
+    const aba = obterAba(CONFIG.ABA_CATEGORIAS_EXTRACLASSE);
+    const cabecalhos = validarCabecalhos(
+      aba,
+      CABECALHOS.CATEGORIAS_EXTRACLASSE
+    );
+
+    const ultimaLinha = aba.getLastRow();
+    if (ultimaLinha < 2) return [];
+
+    const indiceId = cabecalhos.indexOf('id');
+    const indiceCategoria = cabecalhos.indexOf('categoria');
+    const indiceStatus = cabecalhos.indexOf('status');
+
+    return aba
+      .getRange(2, 1, ultimaLinha - 1, cabecalhos.length)
+      .getValues()
+      .map(function (linha) {
+        return {
+          id: normalizarTexto(linha[indiceId]),
+          categoria: normalizarTexto(linha[indiceCategoria]),
+          status: indiceStatus >= 0
+            ? normalizarTexto(linha[indiceStatus]).toUpperCase()
+            : ''
+        };
+      })
+      .filter(function (item) {
+        if (!item.id || !item.categoria) return false;
+        return !item.status || item.status === CONFIG.STATUS_ATIVO;
+      })
+      .map(function (item) {
+        return { id: item.id, categoria: item.categoria };
+      })
+      .sort(function (a, b) {
+        return a.categoria.localeCompare(b.categoria, 'pt-BR');
+      });
+  });
+}
+
+function calcularDatasExtraclasse(dataInicio, dataFim, diasSemana) {
+  const inicio = normalizarData(dataInicio);
+  const fim = normalizarData(dataFim);
+
+  if (!dataValida(inicio)) throw new Error('Data inicial inválida.');
+  if (!dataValida(fim)) throw new Error('Data final inválida.');
+  if (inicio > fim) throw new Error('A data inicial não pode ser posterior à data final.');
+
+  const dias = normalizarDiasSemana(diasSemana);
+  if (!dias.length) throw new Error('Selecione pelo menos um dia de realização.');
+
+  return gerarDatasOcorrencias(inicio, fim, dias);
+}
+
+function validarAtividadeExtraclasse(dados) {
+
+  if (
+    !dados ||
+    typeof dados !== "object"
+  ) {
+    throw new Error(
+      "Dados da atividade não informados."
+    );
+  }
+
+
+  const funcionarioValidado = obterFuncionarioValidado(
+    dados.funcionario_id,
+    dados.matricula
+  );
+
+  const atividade = {
+
+    nome: funcionarioValidado.nome,
+
+    matricula: funcionarioValidado.matricula,
+
+    email: funcionarioValidado.email,
+
+    data_inicio:
+      normalizarData(
+        dados.data_inicio
+      ),
+
+    data_fim:
+      normalizarData(
+        dados.data_fim
+      ),
+
+    dias_semana:
+      normalizarDiasSemana(
+        dados.dias_semana
+      ),
+
+    categoria:
+      normalizarTexto(
+        dados.categoria
+      ),
+
+    carga_horaria_diaria:
+      Number(
+        dados.carga_horaria_diaria
+      ),
+
+    descricao:
+      normalizarTexto(
+        dados.descricao
+      )
+
+  };
+
+
+  if (!atividade.nome) {
+    throw new Error(
+      "Informe o funcionário."
+    );
+  }
+
+
+  if (!atividade.matricula) {
+    throw new Error(
+      "Informe a matrícula."
+    );
+  }
+
+
+  if (
+    !dataValida(
+      atividade.data_inicio
+    )
+  ) {
+    throw new Error(
+      "Informe uma data inicial válida."
+    );
+  }
+
+
+  if (
+    !dataValida(
+      atividade.data_fim
+    )
+  ) {
+    throw new Error(
+      "Informe uma data final válida."
+    );
+  }
+
+
+  if (
+    atividade.data_inicio >
+    atividade.data_fim
+  ) {
+    throw new Error(
+      "A data inicial não pode ser posterior à data final."
+    );
+  }
+
+
+  const hoje = obterDataHoje();
+
+  if (atividade.data_inicio > hoje || atividade.data_fim > hoje) {
+    throw new Error(
+      "Atividades extraclasse realizadas não podem possuir datas futuras."
+    );
+  }
+
+
+  if (
+    !atividade.dias_semana.length
+  ) {
+    throw new Error(
+      "Selecione os dias de realização da atividade."
+    );
+  }
+
+
+  if (!atividade.categoria) {
+    throw new Error(
+      "Selecione a categoria da atividade."
+    );
+  }
+
+
+  if (
+    !Number.isFinite(
+      atividade.carga_horaria_diaria
+    ) ||
+    atividade.carga_horaria_diaria <= 0 ||
+    atividade.carga_horaria_diaria > 24
+  ) {
+    throw new Error(
+      "Informe uma carga horária diária válida."
+    );
+  }
+
+
+  if (!atividade.descricao) {
+    throw new Error(
+      "Informe a descrição da atividade."
+    );
+  }
+
+
+  /*
+   * Confere Nome + Matrícula.
+   */
+
+  const funcionario =
+    listarFuncionariosExtraclasse()
+      .find(item =>
+        item.matricula ===
+        atividade.matricula
+      );
+
+
+  if (!funcionario) {
+    throw new Error(
+      "Matrícula não encontrada ou funcionário inativo."
+    );
+  }
+
+
+  if (
+    funcionario.nome !==
+    atividade.nome
+  ) {
+    throw new Error(
+      "O nome informado não corresponde à matrícula selecionada."
+    );
+  }
+
+
+  const categorias =
+    listarCategoriasExtraclasse();
+
+
+  const categoriaExiste =
+    categorias.some(
+      item =>
+        item.categoria ===
+        atividade.categoria
+    );
+
+
+  if (!categoriaExiste) {
+    throw new Error(
+      "Categoria de atividade inválida."
+    );
+  }
+
+
+  const datas =
+    calcularDatasExtraclasse(
+      atividade.data_inicio,
+      atividade.data_fim,
+      atividade.dias_semana
+    );
+
+
+  if (!datas.length) {
+    throw new Error(
+      "Nenhuma data de realização foi encontrada no período informado."
+    );
+  }
+
+
+  atividade.datas_realizadas =
+    datas;
+
+  atividade.qtd_dias =
+    datas.length;
+
+  atividade.carga_horaria_total =
+    Number(
+      (
+        atividade.qtd_dias *
+        atividade.carga_horaria_diaria
+      ).toFixed(2)
+    );
+
+
+  return atividade;
+}
+
+function atividadeExtraclasseDuplicada(atividade) {
+  const aba = obterAba(CONFIG.ABA_ATIVIDADES_EXTRACLASSE);
+  const cabecalhos = validarCabecalhos(aba, CABECALHOS.ATIVIDADES_EXTRACLASSE);
+  const ultimaLinha = aba.getLastRow();
+  if (ultimaLinha < 2) return false;
+
+  const indice = {};
+  cabecalhos.forEach((nome, i) => indice[nome] = i);
+
+  const diasNovos = normalizarDiasSemana(atividade.dias_semana).sort().join(',');
+  const descricaoNova = normalizarTexto(atividade.descricao).toLowerCase();
+
+  return aba.getRange(2, 1, ultimaLinha - 1, cabecalhos.length).getValues().some(linha => {
+    const diasExistentes = normalizarDiasSemana(linha[indice.dias_semana]).sort().join(',');
+    const descricaoExistente = normalizarTexto(linha[indice.descricao]).toLowerCase();
+
+    return normalizarTexto(linha[indice.matricula]) === atividade.matricula &&
+      normalizarData(linha[indice.data_inicio]) === atividade.data_inicio &&
+      normalizarData(linha[indice.data_fim]) === atividade.data_fim &&
+      diasExistentes === diasNovos &&
+      normalizarTexto(linha[indice.categoria]) === atividade.categoria &&
+      Number(linha[indice.carga_horaria_diaria]) === Number(atividade.carga_horaria_diaria) &&
+      descricaoExistente === descricaoNova;
+  });
+}
+
+function registrarAtividadeExtraclasse(dados) {
+
+  const lock =
+    LockService.getScriptLock();
+
+  let lockObtido = false;
+
+
+  try {
+
+    lock.waitLock(
+      CONFIG.LOCK_TIMEOUT_MS
+    );
+
+    lockObtido = true;
+
+
+    const atividade =
+      validarAtividadeExtraclasse(
+        dados
+      );
+
+
+    if (atividadeExtraclasseDuplicada(atividade)) {
+      return {
+        sucesso: false,
+        mensagem: "Esta atividade extraclasse já foi registrada com os mesmos dados."
+      };
+    }
+
+
+    const id =
+      "EXT-" +
+      Utilities
+        .getUuid()
+        .split("-")[0]
+        .toUpperCase();
+
+
+    const agora =
+      new Date();
+
+
+    obterAba(
+      CONFIG.ABA_ATIVIDADES_EXTRACLASSE
+    )
+      .appendRow([
+
+        id,
+
+        atividade.nome,
+
+        atividade.matricula,
+
+        atividade.data_inicio,
+
+        atividade.data_fim,
+
+        atividade.dias_semana
+          .join(","),
+
+        atividade.datas_realizadas
+          .join(","),
+
+        atividade.categoria,
+
+        atividade.carga_horaria_diaria,
+
+        atividade.qtd_dias,
+
+        atividade.carga_horaria_total,
+
+        atividade.descricao,
+
+        agora
+
+      ]);
+
+
+    SpreadsheetApp.flush();
+
+    const textoEmail = [
+      'Olá, ' + atividade.nome + '.',
+      '',
+      'Sua atividade extraclasse foi registrada com sucesso.',
+      'Categoria: ' + atividade.categoria,
+      'Período: ' + atividade.data_inicio + ' a ' + atividade.data_fim,
+      'Dias realizados: ' + atividade.qtd_dias,
+      'Carga diária: ' + atividade.carga_horaria_diaria + 'h',
+      'Carga total: ' + atividade.carga_horaria_total + 'h',
+      'Código: ' + id
+    ].join('\n');
+
+    const emailResultado = enviarEmailSgd(
+      atividade.email,
+      'Confirmação de atividade extraclasse - ' + id,
+      textoEmail,
+      '<p>Olá, <strong>' + escaparHtml(atividade.nome) + '</strong>.</p>' +
+      '<p>Sua atividade extraclasse foi registrada com sucesso.</p>' +
+      '<ul><li><strong>Categoria:</strong> ' + escaparHtml(atividade.categoria) + '</li>' +
+      '<li><strong>Período:</strong> ' + escaparHtml(atividade.data_inicio) + ' a ' + escaparHtml(atividade.data_fim) + '</li>' +
+      '<li><strong>Dias realizados:</strong> ' + atividade.qtd_dias + '</li>' +
+      '<li><strong>Carga diária:</strong> ' + atividade.carga_horaria_diaria + 'h</li>' +
+      '<li><strong>Carga total:</strong> ' + atividade.carga_horaria_total + 'h</li>' +
+      '<li><strong>Código:</strong> ' + escaparHtml(id) + '</li></ul>'
+    );
+
+
+    return {
+
+      sucesso: true,
+
+      mensagem:
+        "Atividade extraclasse registrada com sucesso.",
+
+      id: id,
+
+      email_enviado: emailResultado.enviado,
+
+      calculo: {
+
+        quantidadeDias:
+          atividade.qtd_dias,
+
+        cargaHorariaDiaria:
+          atividade.carga_horaria_diaria,
+
+        cargaHorariaTotal:
+          atividade.carga_horaria_total,
+
+        datasRealizadas:
+          atividade.datas_realizadas
+
+      }
+
+    };
+
+
+  } finally {
+
+    if (lockObtido) {
+      lock.releaseLock();
+    }
+
+  }
+
+}
+
+function listarRelatorioExtraclasse(
+  filtros,
+  token
+) {
+
+  if (
+    !validarTokenMaster(token)
+  ) {
+
+    return {
+      sucesso: false,
+      mensagem:
+        "Acesso permitido somente ao usuário master."
+    };
+
+  }
+
+
+  filtros =
+    filtros || {};
+
+
+  const nome =
+    normalizarTexto(
+      filtros.nome
+    );
+
+
+  const categoria =
+    normalizarTexto(
+      filtros.categoria
+    );
+
+
+  const dataInicio =
+    filtros.data_inicio
+      ? normalizarData(
+          filtros.data_inicio
+        )
+      : "";
+
+
+  const dataFim =
+    filtros.data_fim
+      ? normalizarData(
+          filtros.data_fim
+        )
+      : "";
+
+
+  if (dataInicio && !dataValida(dataInicio)) {
+    throw new Error("Data inicial do filtro inválida.");
+  }
+
+  if (dataFim && !dataValida(dataFim)) {
+    throw new Error("Data final do filtro inválida.");
+  }
+
+  if (dataInicio && dataFim && dataInicio > dataFim) {
+    throw new Error("No relatório, a data inicial não pode ser posterior à data final.");
+  }
+
+
+  const aba =
+    obterAba(
+      CONFIG.ABA_ATIVIDADES_EXTRACLASSE
+    );
+
+
+  const cabecalhos =
+    validarCabecalhos(
+      aba,
+      CABECALHOS.ATIVIDADES_EXTRACLASSE
+    );
+
+
+  const ultimaLinha =
+    aba.getLastRow();
+
+
+  if (ultimaLinha < 2) {
+
+    return {
+      sucesso: true,
+      dados: [],
+      resumo: {
+        quantidadeAtividades: 0,
+        quantidadeDias: 0,
+        cargaHorariaTotal: 0
+      }
+    };
+
+  }
+
+
+  const linhas =
+    aba
+      .getRange(
+        2,
+        1,
+        ultimaLinha - 1,
+        cabecalhos.length
+      )
+      .getValues();
+
+
+  const atividades = [];
+
+
+  linhas.forEach(linha => {
+
+    const item = {};
+
+
+    cabecalhos.forEach(
+      (cabecalho, indice) => {
+
+        let valor =
+          linha[indice];
+
+
+        if (
+          cabecalho ===
+            "data_inicio" ||
+          cabecalho ===
+            "data_fim"
+        ) {
+
+          valor =
+            normalizarData(
+              valor
+            );
+
+        }
+
+
+        item[cabecalho] =
+          valor;
+
+      }
+    );
+
+
+    if (
+      nome &&
+      normalizarTexto(
+        item.nome
+      ) !== nome
+    ) {
+      return;
+    }
+
+
+    if (
+      categoria &&
+      normalizarTexto(
+        item.categoria
+      ) !== categoria
+    ) {
+      return;
+    }
+
+
+    const datas =
+      normalizarTexto(
+        item.datas_realizadas
+      )
+        .split(",")
+        .map(item =>
+          item.trim()
+        )
+        .filter(Boolean);
+
+
+    const datasFiltradas =
+      datas.filter(data => {
+
+        if (
+          dataInicio &&
+          data < dataInicio
+        ) {
+          return false;
+        }
+
+
+        if (
+          dataFim &&
+          data > dataFim
+        ) {
+          return false;
+        }
+
+
+        return true;
+
+      });
+
+
+    if (
+      (
+        dataInicio ||
+        dataFim
+      ) &&
+      !datasFiltradas.length
+    ) {
+      return;
+    }
+
+
+    const cargaDiaria =
+      Number(
+        item.carga_horaria_diaria
+      ) || 0;
+
+
+    item.datas_periodo =
+      datasFiltradas;
+
+    item.qtd_dias_periodo =
+      datasFiltradas.length;
+
+    item.carga_horaria_periodo =
+      Number(
+        (
+          datasFiltradas.length *
+          cargaDiaria
+        ).toFixed(2)
+      );
+
+
+    atividades.push(
+      item
+    );
+
+  });
+
+
+  const quantidadeDias =
+    atividades.reduce(
+      (total, item) =>
+        total +
+        item.qtd_dias_periodo,
+      0
+    );
+
+
+  const cargaHorariaTotal =
+    atividades.reduce(
+      (total, item) =>
+        total +
+        item.carga_horaria_periodo,
+      0
+    );
+
+
+  return {
+
+    sucesso: true,
+
+    dados:
+      atividades,
+
+    resumo: {
+
+      quantidadeAtividades:
+        atividades.length,
+
+      quantidadeDias:
+        quantidadeDias,
+
+      cargaHorariaTotal:
+        Number(
+          cargaHorariaTotal
+            .toFixed(2)
+        )
+
+    }
+
+  };
+
+}
+
+/* ============================================================
+ * TESTES DO MÓDULO EXTRACLASSE
+ * ============================================================ */
+
+function testarCalculoExtraclasse() {
+  const datas = calcularDatasExtraclasse(
+    '2026-09-14',
+    '2026-09-30',
+    ['quarta', 'quinta']
+  );
+
+  const resultado = {
+    datas: datas,
+    quantidadeDias: datas.length,
+    cargaDiaria: 4,
+    cargaTotal: datas.length * 4
+  };
+
+  console.log(JSON.stringify(resultado, null, 2));
+  return resultado;
+}
+
+function testarEstruturaSistema() {
+  const planilha = obterPlanilha();
+  const verificacoes = [
+    [CONFIG.ABA_SALAS, CABECALHOS.SALAS],
+    [CONFIG.ABA_AGENDAMENTOS, CABECALHOS.AGENDAMENTOS],
+    [CONFIG.ABA_SOFTWARES, CABECALHOS.SOFTWARES],
+    [CONFIG.ABA_SALAS_SOFTWARES, CABECALHOS.SALAS_SOFTWARES],
+    [CONFIG.ABA_FUNCIONARIOS, CABECALHOS.FUNCIONARIOS],
+    [CONFIG.ABA_CATEGORIAS_EXTRACLASSE, CABECALHOS.CATEGORIAS_EXTRACLASSE],
+    [CONFIG.ABA_ATIVIDADES_EXTRACLASSE, CABECALHOS.ATIVIDADES_EXTRACLASSE]
+  ];
+
+  if (typeof MC_CONFIG !== 'undefined' && typeof MC_CABECALHOS !== 'undefined') {
+    verificacoes.push(
+      [MC_CONFIG.ABA_AREAS, MC_CABECALHOS.AREAS],
+      [MC_CONFIG.ABA_UNIDADES_CURRICULARES, MC_CABECALHOS.UNIDADES_CURRICULARES],
+      [MC_CONFIG.ABA_AREAS_UCS, MC_CABECALHOS.AREAS_UCS],
+      [MC_CONFIG.ABA_COMPETENCIAS, MC_CABECALHOS.COMPETENCIAS],
+      [MC_CONFIG.ABA_HISTORICO, MC_CABECALHOS.HISTORICO],
+      [MC_CONFIG.ABA_MOTIVOS, MC_CABECALHOS.MOTIVOS]
+    );
+  }
+
+  const resultado = verificacoes.map(([nome, cabecalhos]) => {
+    const aba = planilha.getSheetByName(nome);
+    if (!aba) return { aba: nome, ok: false, mensagem: 'Aba não encontrada.' };
+
+    try {
+      validarCabecalhos(aba, cabecalhos);
+      return { aba: nome, ok: true };
+    } catch (erro) {
+      return { aba: nome, ok: false, mensagem: erro.message };
+    }
+  });
+
+  console.log(JSON.stringify(resultado, null, 2));
+  return resultado;
 }

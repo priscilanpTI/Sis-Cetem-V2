@@ -31,6 +31,7 @@ export interface Booking {
   status: BookingStatus;
   createdAt?: string;
   updatedAt?: string;
+  notificationEmailSent?: boolean;
 }
 
 export interface CreateBookingInput {
@@ -40,8 +41,10 @@ export interface CreateBookingInput {
   weekdays: WeekdayCode[];
   startTime: string;
   endTime: string;
+  employeeId: string;
+  matricula: string;
   responsible: string;
-  emailResponsible?: string;
+  emailResponsible: string;
   softwareIds: string[];
   notes?: string;
 }
@@ -51,9 +54,4 @@ export interface BookingConflict {
   bookingId?: string;
   startTime?: string;
   endTime?: string;
-}
-
-export interface MasterSession {
-  token: string;
-  user: string;
 }

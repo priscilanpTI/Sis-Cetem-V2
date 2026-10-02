@@ -2,6 +2,8 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { bookingService, roomService, softwareService } from '../services/bookingService';
+import { listarFuncionariosPublicos, validarFuncionario } from '../services/funcionarioService';
+import type { FuncionarioPublico } from '../services/funcionarioService';
 import type { Booking, BookingConflict, Room, Software, WeekdayCode } from '../types';
 import {
   WEEKDAYS,
@@ -49,6 +51,12 @@ export function NewBooking() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [softwares, setSoftwares] = useState<Software[]>([]);
+  const [funcionarios, setFuncionarios] = useState<FuncionarioPublico[]>([]);
+  const [funcionarioId, setFuncionarioId] = useState('');
+  const [matricula, setMatricula] = useState('');
+  const [emailResponsavel, setEmailResponsavel] = useState('');
+  const [identidadeValidada, setIdentidadeValidada] = useState(false);
+  const [validandoIdentidade, setValidandoIdentidade] = useState(false);
   const [roomId, setRoomId] = useState('');
   const [selectedSoftwareIds, setSelectedSoftwareIds] = useState<string[]>([]);
   const [selectedWeekdays, setSelectedWeekdays] = useState<WeekdayCode[]>([]);
@@ -102,6 +110,45 @@ export function NewBooking() {
     []
   );
 
+  const plannerSlots = useMemo(() => {
+    if (!roomId) return { slots: [], index: new Map<string, (typeof emptySlot) & {}>() };
+    const slots: Array<{
+      hour: number;
+      date: string;
+      slotStart: string;
+      slotEnd: string;
+      existing?: Booking;
+      selected: boolean;
+      conflict: boolean;
+    }> = [];
+    const index = new Map<string, (typeof slots)[number]>();
+    for (const hour of plannerHours) {
+      const slotStart = hourLabel(hour);
+      const slotEnd = hourLabel(hour + 1);
+      for (const date of plannerDays) {
+        const existing = getExistingBookingForSlot(date, slotStart, slotEnd);
+        const selected =
+          selectedOccurrencesSet.has(date) &&
+          Boolean(startTime && endTime) &&
+          timesOverlap(startTime, endTime, slotStart, slotEnd);
+        const entry = {
+          hour,
+          date,
+          slotStart,
+          slotEnd,
+          existing,
+          selected,
+          conflict: Boolean(existing && selected),
+        };
+        slots.push(entry);
+        index.set(`${hour}|${date}`, entry);
+      }
+    }
+    return { slots, index };
+  }, [roomId, plannerHours, plannerDays, selectedOccurrencesSet, startTime, endTime, roomBookings]);
+
+  const emptySlot = { existing: undefined, selected: false, conflict: false };
+
   const selectedSoftwareLabel = useMemo(() => {
     if (selectedSoftwareIds.length === 0) return 'Selecione os softwares necessários';
     const selected = softwares.filter((software) => selectedSoftwareIds.includes(software.id));
@@ -111,10 +158,11 @@ export function NewBooking() {
   }, [selectedSoftwareIds, softwares]);
 
   useEffect(() => {
-    Promise.all([roomService.list(), bookingService.list()])
-      .then(([roomList, bookingList]) => {
+    Promise.all([roomService.list(), bookingService.list(), listarFuncionariosPublicos()])
+      .then(([roomList, bookingList, employeeList]) => {
         setRooms(roomList);
         setBookings(bookingList);
+        setFuncionarios(employeeList);
       })
       .catch((e) =>
         setError(e instanceof Error ? e.message : 'Não foi possível carregar a agenda.')
@@ -180,15 +228,48 @@ export function NewBooking() {
     );
   }
 
+  const funcionarioSelecionado = useMemo(
+    () => funcionarios.find((item) => item.id === funcionarioId) || null,
+    [funcionarios, funcionarioId]
+  );
+
+  async function validarIdentidade(): Promise<boolean> {
+    if (!funcionarioId) {
+      setError('Selecione o funcionário responsável.');
+      return false;
+    }
+    if (!matricula.trim()) {
+      setError('Digite sua matrícula.');
+      return false;
+    }
+
+    try {
+      setValidandoIdentidade(true);
+      const funcionario = await validarFuncionario(funcionarioId, matricula);
+      setEmailResponsavel(funcionario.email);
+      setIdentidadeValidada(true);
+      setError('');
+      return true;
+    } catch (error) {
+      setEmailResponsavel('');
+      setIdentidadeValidada(false);
+      setError(error instanceof Error ? error.message : 'Não foi possível validar a matrícula.');
+      return false;
+    } finally {
+      setValidandoIdentidade(false);
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError('');
     setConflicts([]);
 
     const formData = new FormData(event.currentTarget);
-    const responsible = String(formData.get('responsible') || '').trim();
-    const emailResponsible = String(formData.get('emailResponsible') || '').trim();
     const notes = String(formData.get('notes') || '').trim();
+
+    const identidadeOk = identidadeValidada || (await validarIdentidade());
+    if (!identidadeOk) return;
 
     if (!roomId) {
       setError('Selecione um laboratório.');
@@ -238,18 +319,24 @@ export function NewBooking() {
     setSaving(true);
 
     try {
-      await bookingService.create({
+      const criado = await bookingService.create({
         roomId,
         startDate,
         endDate,
         weekdays: selectedWeekdays,
         startTime,
         endTime,
-        responsible,
-        emailResponsible,
+        employeeId: funcionarioId,
+        matricula: matricula.trim(),
+        responsible: funcionarioSelecionado?.nome || '',
+        emailResponsible: emailResponsavel,
         softwareIds: selectedSoftwareIds,
         notes
       });
+
+      if (criado.notificationEmailSent === false) {
+        window.alert('O agendamento foi salvo, mas o e-mail de confirmação não pôde ser enviado. Verifique o e-mail cadastrado ou a cota do Apps Script.');
+      }
 
       navigate('/agendamentos');
     } catch (e) {
@@ -391,17 +478,52 @@ export function NewBooking() {
         </label>
 
         <label>
-          Responsável
-          <input name="responsible" placeholder="Nome do responsável" required disabled={saving} />
+          Funcionário responsável
+          <select
+            value={funcionarioId}
+            onChange={(event) => {
+              setFuncionarioId(event.target.value);
+              setMatricula('');
+              setEmailResponsavel('');
+              setIdentidadeValidada(false);
+              setError('');
+            }}
+            required
+            disabled={saving || loading}
+          >
+            <option value="">Selecione...</option>
+            {funcionarios.map((funcionario) => (
+              <option key={funcionario.id} value={funcionario.id}>{funcionario.nome}</option>
+            ))}
+          </select>
         </label>
 
         <label>
-          E-mail do responsável
+          Matrícula
+          <input
+            type="text"
+            value={matricula}
+            onChange={(event) => {
+              setMatricula(event.target.value);
+              setEmailResponsavel('');
+              setIdentidadeValidada(false);
+            }}
+            onBlur={() => { if (funcionarioId && matricula.trim()) void validarIdentidade(); }}
+            placeholder="Digite sua matrícula"
+            autoComplete="off"
+            required
+            disabled={saving || !funcionarioId}
+          />
+          <span className="field-hint">A matrícula é validada sem informar o número correto em caso de erro.</span>
+        </label>
+
+        <label>
+          E-mail
           <input
             type="email"
-            name="emailResponsible"
-            placeholder="nome@empresa.com.br"
-            disabled={saving}
+            value={emailResponsavel}
+            readOnly
+            placeholder={validandoIdentidade ? 'Validando...' : 'Preenchido após validar a matrícula'}
           />
         </label>
 
@@ -548,6 +670,10 @@ export function NewBooking() {
 
         {!roomId ? (
           <div className="planner-empty">Selecione um laboratório acima para carregar o planner.</div>
+        ) : loading ? (
+          <div className="skeleton-grid" style={{ padding: '24px', margin: 0, borderTop: '1px solid #eef2f7' }}>
+            <div className="skeleton-big" style={{ gridColumn: '1 / -1' }} />
+          </div>
         ) : (
           <div className="planner-scroll">
             <div className="planner-grid">
@@ -561,17 +687,15 @@ export function NewBooking() {
 
               {plannerHours.flatMap((hour) => {
                 const slotStart = hourLabel(hour);
-                const slotEnd = hourLabel(hour + 1);
                 return [
                   <div className="planner-time" key={`time-${hour}`}>{slotStart}</div>,
                   ...plannerDays.map((date) => {
-                    const existing = getExistingBookingForSlot(date, slotStart, slotEnd);
-                    const selected =
-                      selectedOccurrencesSet.has(date) &&
-                      Boolean(startTime && endTime) &&
-                      timesOverlap(startTime, endTime, slotStart, slotEnd);
+                    const slot = plannerSlots.index.get(`${hour}|${date}`) || emptySlot;
+                    const existing = slot.existing;
+                    const selected = slot.selected;
+                    const conflict = slot.conflict;
 
-                    const className = existing && selected
+                    const className = conflict
                       ? 'conflict'
                       : selected
                         ? 'selected'
